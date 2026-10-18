@@ -1,0 +1,10 @@
+# La biblioteca de Ilary
+
+Una biblioteca digital personal para llevar el registro de todo lo que se lee.
+
+- **Estanterías**: Leyendo, Leídos, Quiero leer y Abandonados, con fechas de inicio y fin.
+- **Búsqueda de libros** por título, autor o ISBN, con datos de Google Books y Open Library: portada, autor, género, año, páginas, editorial y sinopsis.
+- **Escáner de código de barras** para agregar un libro físico apuntando la cámara a su ISBN.
+- **Fichas de autor** con biografía, foto, sus libros en la biblioteca y otras obras para descubrir.
+- **Alta manual** para libros que no aparecen en ninguna fuente, con foto de portada propia.
+- **Funciona sin conexión**: se instala en el teléfono como app y los cambios se sincronizan cuando vuelve internet.
