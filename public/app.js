@@ -364,6 +364,14 @@ function route() {
   const params = new URLSearchParams(qs || "");
   currentRoute = parts[0];
   closeDialogs();
+  if (parts[0] !== "read") {
+    document.body.classList.remove("reading-mode");
+    if (wakeLock) setWakeLock(false);
+  }
+  setTimeout(() => {
+    updateTimerPill();
+    checkForgottenTimer();
+  });
   const navKey = ["add", "manual", "goodreads"].includes(parts[0]) ? "add" : "shelf";
   $$(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === navKey));
   $('.nav a[data-nav="shelf"]').href = `#/shelf/${lastShelf}`;
@@ -384,6 +392,10 @@ function route() {
       return renderGoodreads();
     case "review":
       return renderReview(getBook(parts[1]));
+    case "read":
+      return renderReadMode(getBook(parts[1]));
+    case "session":
+      return renderSession(getBook(parts[1]), parts[2] || "manual");
     case "author":
       return renderAuthor(decodeURIComponent(parts[1] || ""), parts[2] || "");
     default:
@@ -424,6 +436,7 @@ function renderShelf(status) {
         )
         .join("")}
     </div>
+    ${status === "reading" ? goalWidgetHtml() : ""}
     <div class="toolbar">
       <input class="filter" type="search" placeholder="Filtrar por título o autor" value="${esc(shelfFilter)}" aria-label="Filtrar">
       <div class="viewtoggle" role="group" aria-label="Vista">
@@ -493,8 +506,10 @@ function cardHtml(b) {
   if (b.status === "reading" && b.startedAt) sub = `Desde ${fmtDate(b.startedAt)}`;
   if (b.status === "read" && b.finishedAt) sub = fmtDate(b.finishedAt);
   if (b.rating && (b.status === "read" || b.status === "abandoned")) sub = `<span class="card-stars">★ ${fmtRating(b.rating)}</span>${sub ? " · " + sub : ""}`;
+  const showBar = b.status === "reading" && progressPct(b) > 0;
   return `<a class="card" href="#/book/${b.id}">
     ${coverHtml(b)}
+    ${showBar ? `<span class="card-bar"><span style="width:${progressPct(b).toFixed(1)}%"></span></span>` : ""}
     <span class="card-title">${esc(b.title)}</span>
     <span class="card-author">${esc((b.authors || []).join(", "))}</span>
     ${sub ? `<span class="card-sub">${sub}</span>` : ""}
@@ -693,6 +708,8 @@ async function renderBook(id) {
           : ""
       }
 
+      ${readingSectionHtml(b)}
+
       ${b.status !== "want" ? reviewSectionHtml(b) : ""}
 
       ${(b.tags || []).length ? `<div class="tags">${b.tags.map((t) => `<span>${esc(t.replace(/-/g, " "))}</span>`).join("")}</div>` : ""}
@@ -716,6 +733,7 @@ async function renderBook(id) {
 
   view._book = b.id;
   $$(".picker", view).forEach(paintPicker);
+  updateTimerPill();
 
   const descEl = $("#bdesc");
   if (descEl && descEl.scrollHeight <= descEl.clientHeight + 2) $('[data-action="more"]')?.remove();
@@ -1141,6 +1159,451 @@ function renderReview(b) {
   });
 }
 
+// ---------- Timer de lectura ----------
+// El timer guarda la hora de inicio (no un contador), así sigue bien aunque se cierre la app.
+let timer = load("lib.timer", null);
+const FORGOT_AFTER = 2 * 3600 * 1000; // preguntar si sigue leyendo tras 2 h seguidas
+
+function saveTimer(t) {
+  timer = t;
+  save("lib.timer", t);
+  saveSettings({ activeTimer: t || null });
+  updateTimerPill();
+}
+const elapsedMs = (t, end) => Math.max(0, (end || t.pausedAt || Date.now()) - t.startedAt - (t.pausedMs || 0));
+function fmtClock(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`;
+}
+function fmtDur(min) {
+  min = Math.round(min);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+const localDate = (ms) => new Date(ms).toLocaleDateString("en-CA");
+const timeOf = (ms) => new Date(ms).toTimeString().slice(0, 5);
+
+// Progreso: siempre se guarda la página; si lee en %, también el % (y se convierte a páginas)
+const currentPage = (b) => b.progress?.page || 0;
+function progressPct(b) {
+  if (b.pages && b.progress?.page) return Math.min(100, (b.progress.page / b.pages) * 100);
+  return b.progress?.percent || 0;
+}
+const progressUnit = (b) => b.progress?.unit || "page";
+
+function bookTimeStats(b) {
+  const sessions = b.sessions || [];
+  const minutes = sessions.reduce((a, s) => a + (s.minutes || 0), 0);
+  let pages = 0, pageMin = 0, pct = 0, pctMin = 0;
+  for (const s of sessions) {
+    if (!s.minutes) continue;
+    const dp = (s.toPage || 0) - (s.fromPage || 0);
+    if (dp > 0) (pages += dp), (pageMin += s.minutes);
+    else if (s.toPercent != null && s.fromPercent != null && s.toPercent > s.fromPercent) (pct += s.toPercent - s.fromPercent), (pctMin += s.minutes);
+  }
+  const pagesPerHour = pageMin ? pages / (pageMin / 60) : 0;
+  const pctPerHour = pctMin ? pct / (pctMin / 60) : 0;
+  let remainingMin = 0;
+  if (b.status !== "read") {
+    if (pagesPerHour && b.pages) remainingMin = Math.max(0, ((b.pages - currentPage(b)) / pagesPerHour) * 60);
+    else if (pctPerHour) remainingMin = Math.max(0, ((100 - progressPct(b)) / pctPerHour) * 60);
+  }
+  return { minutes, pagesPerHour, pctPerHour, remainingMin, count: sessions.length };
+}
+
+function startTimer(b, { reading = false } = {}) {
+  if (timer && timer.bookId !== b.id) {
+    const other = getBook(timer.bookId);
+    if (other) {
+      toast(`Primero termina la sesión de «${other.title}»`);
+      return go(`#/session/${other.id}/new`);
+    }
+  }
+  if (!timer) {
+    if (b.status !== "reading") changeStatus(b, "reading");
+    const fresh = getBook(b.id);
+    saveTimer({
+      bookId: b.id,
+      startedAt: Date.now(),
+      pausedAt: null,
+      pausedMs: 0,
+      fromPage: currentPage(fresh),
+      fromPercent: fresh.progress?.percent ?? null,
+    });
+  }
+  if (reading) go(`#/read/${b.id}`);
+  else rerenderSoft();
+}
+
+function togglePause() {
+  if (!timer) return;
+  if (timer.pausedAt) saveTimer({ ...timer, pausedMs: (timer.pausedMs || 0) + (Date.now() - timer.pausedAt), pausedAt: null });
+  else saveTimer({ ...timer, pausedAt: Date.now() });
+  tick();
+  $$("[data-action=timer-pause]").forEach((btn) => (btn.textContent = timer.pausedAt ? "Seguir" : "Pausar"));
+  $$(".timer-live").forEach((el) => el.classList.toggle("paused", !!timer.pausedAt));
+}
+
+// Actualiza los relojes visibles una vez por segundo
+function tick() {
+  if (!timer) return;
+  const txt = fmtClock(elapsedMs(timer));
+  $$("[data-clock]").forEach((el) => (el.textContent = txt));
+}
+setInterval(tick, 1000);
+
+function updateTimerPill() {
+  const pill = $("#timerPill");
+  if (!pill) return;
+  const b = timer && getBook(timer.bookId);
+  const hide = !b || currentRoute === "read" || (currentRoute === "book" && view._book === b.id) || currentRoute === "session";
+  pill.hidden = hide;
+  document.body.classList.toggle("has-pill", !hide);
+  if (b) pill.innerHTML = `<span class="pill-dot ${timer.pausedAt ? "paused" : ""}"></span><span class="pill-title">${esc(b.title)}</span><span data-clock>${fmtClock(elapsedMs(timer))}</span>`;
+}
+
+function readingSectionHtml(b) {
+  const active = timer && timer.bookId === b.id;
+  const busyElsewhere = timer && timer.bookId !== b.id;
+  const st = bookTimeStats(b);
+  const pct = progressPct(b);
+  const hasProgress = b.status === "reading" || currentPage(b) || b.progress?.percent;
+  const unitPct = progressUnit(b) === "percent";
+  const progressLabel = unitPct && !b.pages
+    ? `${Math.round(pct)}%`
+    : b.pages
+      ? `Página ${currentPage(b)} de ${b.pages} · ${Math.round(pct)}%`
+      : currentPage(b) ? `Página ${currentPage(b)}` : "Sin progreso todavía";
+
+  const statBits = [];
+  if (st.minutes) statBits.push(["Tiempo leyendo", fmtDur(st.minutes)]);
+  if (st.pagesPerHour) statBits.push(["Ritmo", `${Math.round(st.pagesPerHour)} pág/h`]);
+  else if (st.pctPerHour) statBits.push(["Ritmo", `${st.pctPerHour.toFixed(1).replace(".", ",")}%/h`]);
+  if (st.remainingMin) statBits.push(["Le falta", `≈ ${fmtDur(st.remainingMin)}`]);
+
+  if (b.status !== "reading" && !st.count && !active) {
+    return `<section class="reading-sec compact">
+      ${b.status === "want" ? `<button class="btn primary wide" data-action="timer-start">Empezar a leer</button>` : ""}
+      <a class="link small-link" href="#/session/${b.id}/manual">Anotar una sesión de lectura</a>
+    </section>`;
+  }
+
+  return `<section class="reading-sec">
+    <h2 class="section">Lectura</h2>
+    ${
+      hasProgress
+        ? `<div class="progress"><div class="bar"><span style="width:${pct.toFixed(1)}%"></span></div>
+           <p class="progress-label">${progressLabel}</p></div>`
+        : ""
+    }
+    ${
+      active
+        ? `<div class="timer-live ${timer.pausedAt ? "paused" : ""}">
+             <span class="clock" data-clock>${fmtClock(elapsedMs(timer))}</span>
+             <div class="timer-actions">
+               <button class="btn" data-action="timer-pause">${timer.pausedAt ? "Seguir" : "Pausar"}</button>
+               <button class="btn primary" data-action="timer-finish">Terminar</button>
+             </div>
+             <a class="link small-link" href="#/read/${b.id}">Abrir modo lectura</a>
+           </div>`
+        : b.status !== "read"
+          ? `<div class="timer-start">
+               <button class="btn primary" data-action="timer-start" ${busyElsewhere ? "disabled" : ""}>Empezar a leer</button>
+               <button class="btn" data-action="timer-read" ${busyElsewhere ? "disabled" : ""}>Modo lectura</button>
+             </div>
+             ${busyElsewhere ? `<p class="muted small">Hay una sesión abierta de «${esc(getBook(timer.bookId)?.title || "otro libro")}».</p>` : ""}`
+          : ""
+    }
+    ${statBits.length ? `<dl class="meta tstats">${statBits.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
+    ${sessionsListHtml(b)}
+    <a class="link small-link" href="#/session/${b.id}/manual">+ Anotar una sesión a mano</a>
+  </section>`;
+}
+
+function sessionsListHtml(b) {
+  const list = [...(b.sessions || [])].sort((x, y) => (y.date + (y.start || "")).localeCompare(x.date + (x.start || "")) || (y.start || 0) - (x.start || 0));
+  if (!list.length) return "";
+  const row = (s) => {
+    const dp = (s.toPage || 0) - (s.fromPage || 0);
+    const range = dp > 0 ? `pág. ${s.fromPage} → ${s.toPage}` : s.toPercent != null ? `${Math.round(s.toPercent)}%` : "";
+    return `<a class="session" href="#/session/${b.id}/${s.id}">
+      <span class="session-top"><span>${fmtDate(s.date)}${s.start ? " · " + timeOf(s.start) : ""}</span><span>${s.minutes ? fmtDur(s.minutes) : ""}</span></span>
+      ${range ? `<span class="session-range">${range}${dp > 0 ? ` <em>+${dp}</em>` : ""}</span>` : ""}
+      ${s.note ? `<span class="session-note">${esc(s.note)}</span>` : ""}
+      ${s.feeling ? `<span class="session-feeling">${esc(s.feeling)}</span>` : ""}
+    </a>`;
+  };
+  const first = list.slice(0, 4).map(row).join("");
+  const rest = list.slice(4);
+  return `<div class="sessions"><h3 class="sub-section">Sesiones <span class="muted">${list.length}</span></h3>${first}
+    ${rest.length ? `<details class="more-sessions"><summary>Ver ${rest.length} más</summary>${rest.map(row).join("")}</details>` : ""}</div>`;
+}
+
+// ---------- Modo lectura ----------
+let wakeLock = null;
+async function setWakeLock(on) {
+  try {
+    if (on && "wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+    else if (wakeLock) await wakeLock.release(), (wakeLock = null);
+  } catch {
+    wakeLock = null;
+  }
+}
+
+function renderReadMode(b) {
+  if (!b) return go("#/shelf/reading");
+  if (!timer) return startTimer(b, { reading: true });
+  if (timer.bookId !== b.id) return go(`#/read/${timer.bookId}`);
+  document.body.classList.add("reading-mode");
+  const keepOn = load("lib.wake", false);
+  view.innerHTML = `<div class="readmode">
+    <button class="close rm-close" data-action="read-exit" aria-label="Salir del modo lectura">×</button>
+    <div class="rm-book">${coverHtml(b, "cover rm-cover")}<p class="rm-title">${esc(b.title)}</p><p class="muted small">${esc((b.authors || []).join(", "))}</p></div>
+    <div class="timer-live rm-timer ${timer.pausedAt ? "paused" : ""}">
+      <span class="clock big" data-clock>${fmtClock(elapsedMs(timer))}</span>
+      <p class="muted small rm-state">${b.pages && currentPage(b) ? `Empezaste en la página ${timer.fromPage || currentPage(b)}` : "Disfruta la lectura"}</p>
+    </div>
+    <div class="rm-actions">
+      <button class="btn" data-action="timer-pause">${timer.pausedAt ? "Seguir" : "Pausar"}</button>
+      <button class="btn primary" data-action="timer-finish">Terminar</button>
+    </div>
+    ${"wakeLock" in navigator ? `<label class="check rm-wake"><input type="checkbox" id="wakeToggle" ${keepOn ? "checked" : ""}> Mantener la pantalla encendida</label>` : ""}
+  </div>`;
+  $("#wakeToggle")?.addEventListener("change", (e) => {
+    save("lib.wake", e.target.checked);
+    setWakeLock(e.target.checked);
+  });
+  if (keepOn) setWakeLock(true);
+}
+
+// ---------- Formulario de sesión ----------
+// sid: "new" (cerrar el timer), "manual" (anotar a mano) o el id de una sesión existente
+function renderSession(b, sid) {
+  window.scrollTo(0, 0);
+  if (!b) return go("#/shelf/reading");
+  const fromTimer = sid === "new";
+  if (fromTimer && (!timer || timer.bookId !== b.id)) return go(`#/book/${b.id}`);
+  const existing = !fromTimer && sid !== "manual" ? (b.sessions || []).find((s) => s.id === sid) : null;
+  if (!fromTimer && sid !== "manual" && !existing) return go(`#/book/${b.id}`);
+
+  const unit = progressUnit(b);
+  let minutes, date, fromPage, toPage, toPercent, note = "", feeling = "";
+  if (fromTimer) {
+    minutes = Math.max(1, Math.round(elapsedMs(timer, timer.endOverride) / 60000));
+    date = localDate(timer.startedAt);
+    fromPage = timer.fromPage || 0;
+    toPage = "";
+    toPercent = "";
+  } else if (existing) {
+    ({ minutes, date, fromPage, toPage, note = "", feeling = "" } = existing);
+    toPercent = existing.toPercent ?? "";
+  } else {
+    minutes = 30;
+    date = today();
+    fromPage = currentPage(b);
+    toPage = "";
+    toPercent = "";
+  }
+
+  view.innerHTML = `
+    ${backButton()}
+    <div class="review-head">
+      ${coverHtml(b, "cover sm")}
+      <div><p class="review-book">${esc(b.title)}</p><p class="muted small">${fromTimer ? "Terminar sesión" : existing ? "Editar sesión" : "Anotar sesión"}</p></div>
+    </div>
+    <form id="sf2" class="form session-form" novalidate>
+      ${fromTimer ? `<p class="session-summary"><span class="clock">${fmtDur(minutes)}</span> de lectura${timer.endOverride ? ` hasta las ${timeOf(timer.endOverride)}` : ""}</p>` : ""}
+      <div class="two">
+        <label>Fecha<input type="date" name="date" value="${esc(date)}" max="${today()}"></label>
+        <label>Minutos<input type="number" name="minutes" min="0" max="1440" inputmode="numeric" value="${esc(minutes)}"></label>
+      </div>
+
+      <fieldset class="unit-pick">
+        <legend>¿Hasta dónde llegó?</legend>
+        <div class="seg small-seg">
+          <button type="button" data-unit="page" class="${unit === "page" ? "on" : ""}">Página</button>
+          <button type="button" data-unit="percent" class="${unit === "percent" ? "on" : ""}">Porcentaje</button>
+        </div>
+        <div class="two">
+          <label data-for="page">Desde la página<input type="number" name="fromPage" min="0" inputmode="numeric" value="${esc(fromPage)}"></label>
+          <label data-for="page">Llegó a la página<input type="number" name="toPage" min="0" inputmode="numeric" value="${esc(toPage)}" placeholder="${b.pages ? "de " + b.pages : ""}"></label>
+          <label data-for="percent" class="span2">Porcentaje que marca<input type="number" name="toPercent" min="0" max="100" step="0.1" inputmode="decimal" value="${esc(toPercent)}" placeholder="Ej. 42"></label>
+        </div>
+        <p class="muted small" id="pctHint"></p>
+      </fieldset>
+
+      <label>Nota sobre lo que leyó<textarea name="note" rows="2" placeholder="Qué pasó, una idea, una frase…">${esc(note)}</textarea></label>
+      <label>¿Cómo se sintió?<textarea name="feeling" class="review-input feeling-input" rows="4" placeholder="Escribe lo que quieras…">${esc(feeling)}</textarea></label>
+
+      ${b.status !== "read" ? `<label class="check"><input type="checkbox" name="finished"> Terminé el libro</label>` : ""}
+
+      <div class="row-actions">
+        <button class="btn primary" type="submit">Guardar sesión</button>
+        ${fromTimer ? `<button class="btn" type="button" data-action="timer-resume-back">Seguir leyendo</button>` : ""}
+      </div>
+      ${fromTimer ? `<button type="button" class="link danger-link" data-action="timer-discard">Descartar esta sesión</button>` : ""}
+      ${existing ? `<button type="button" class="link danger-link" data-action="session-delete" data-sid="${existing.id}">Eliminar sesión</button>` : ""}
+    </form>`;
+
+  const form = $("#sf2");
+  let curUnit = unit;
+  const applyUnit = () => {
+    $$("[data-unit]", form).forEach((x) => x.classList.toggle("on", x.dataset.unit === curUnit));
+    $$("[data-for]", form).forEach((x) => (x.hidden = x.dataset.for !== curUnit));
+    updateHint();
+  };
+  const updateHint = () => {
+    const hint = $("#pctHint");
+    if (curUnit === "percent") {
+      const v = parseFloat(form.elements.toPercent.value);
+      hint.textContent = b.pages ? (isNaN(v) ? `Se convierte a páginas (${b.pages} en total).` : `≈ página ${Math.round((v / 100) * b.pages)} de ${b.pages}`) : "Sin número de páginas: el ritmo se medirá en % por hora.";
+    } else {
+      const to = parseInt(form.elements.toPage.value, 10), from = parseInt(form.elements.fromPage.value, 10) || 0;
+      hint.textContent = to > from ? `${to - from} páginas en esta sesión` : "";
+    }
+    const fin = form.elements.finished;
+    if (fin && b.pages) {
+      const reached = curUnit === "percent" ? parseFloat(form.elements.toPercent.value) >= 100 : parseInt(form.elements.toPage.value, 10) >= b.pages;
+      if (reached) fin.checked = true;
+    }
+  };
+  $$("[data-unit]", form).forEach((x) => x.addEventListener("click", () => ((curUnit = x.dataset.unit), applyUnit())));
+  form.addEventListener("input", updateHint);
+  const grow = (t) => ((t.style.height = "auto"), (t.style.height = t.scrollHeight + 2 + "px"));
+  $$("textarea", form).forEach((t) => (grow(t), t.addEventListener("input", () => grow(t))));
+  applyUnit();
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = form.elements;
+    const fresh = getBook(b.id) || b;
+    const mins = Math.max(0, parseInt(f.minutes.value, 10) || 0);
+    const from = Math.max(0, parseInt(f.fromPage.value, 10) || 0);
+    let to = null, pctVal = null;
+    if (curUnit === "percent") {
+      pctVal = parseFloat(f.toPercent.value);
+      pctVal = isNaN(pctVal) ? null : Math.min(100, Math.max(0, pctVal));
+      if (pctVal != null && fresh.pages) to = Math.round((pctVal / 100) * fresh.pages);
+    } else {
+      to = parseInt(f.toPage.value, 10);
+      to = isNaN(to) ? null : Math.max(0, fresh.pages ? Math.min(to, fresh.pages) : to);
+    }
+    const finished = !!f.finished?.checked;
+    if (finished && fresh.pages) (to = fresh.pages), curUnit === "percent" && (pctVal = 100);
+
+    const session = {
+      id: existing?.id || crypto.randomUUID(),
+      date: f.date.value || today(),
+      start: fromTimer ? timer.startedAt : existing?.start || null,
+      minutes: mins,
+      fromPage: from,
+      toPage: to ?? from,
+      fromPercent: fromTimer ? timer.fromPercent : existing?.fromPercent ?? fresh.progress?.percent ?? null,
+      toPercent: pctVal,
+      note: f.note.value.trim(),
+      feeling: f.feeling.value.trim(),
+      manual: !fromTimer && !existing?.start,
+    };
+    const sessions = [...(fresh.sessions || []).filter((s) => s.id !== session.id), session];
+    const next = { ...fresh, sessions };
+    // El progreso avanza con la sesión más reciente (editar una vieja no lo hace retroceder)
+    const latest = [...sessions].sort((x, y) => (x.date + String(x.start || "")).localeCompare(y.date + String(y.start || ""))).pop();
+    if (latest.id === session.id && (to != null || pctVal != null)) {
+      next.progress = { page: to ?? currentPage(fresh), percent: pctVal ?? (fresh.pages && to != null ? (to / fresh.pages) * 100 : fresh.progress?.percent ?? null), unit: curUnit };
+    } else if (next.progress) next.progress = { ...next.progress, unit: curUnit };
+    if (!next.startedAt) next.startedAt = session.date;
+    if (finished) {
+      next.status = "read";
+      next.finishedAt = session.date;
+    } else if (next.status === "want") next.status = "reading";
+    upsert(next);
+    if (fromTimer) saveTimer(null), setWakeLock(false);
+    toast(finished ? "¡Libro terminado! 🎉" : "Sesión guardada");
+    go(finished ? `#/review/${b.id}` : `#/book/${b.id}`);
+  });
+}
+
+// ---------- Timer olvidado ----------
+function checkForgottenTimer() {
+  if (!timer || timer.pausedAt) return;
+  const since = Date.now() - Math.max(timer.startedAt, timer.confirmedAt || 0);
+  if (since < FORGOT_AFTER || currentRoute === "session") return;
+  const b = getBook(timer.bookId);
+  if (!b) return saveTimer(null);
+  if (sheet.open) return;
+  sheet.innerHTML = `<div class="sheet-inner">
+    <h2 class="sheet-title">¿Sigues leyendo?</h2>
+    <p>El timer de <strong>${esc(b.title)}</strong> lleva <strong>${fmtDur(elapsedMs(timer) / 60000)}</strong>.</p>
+    <div class="forgot-actions">
+      <button class="btn primary" data-action="forgot-yes">Sí, sigo leyendo</button>
+      <button class="btn" data-action="forgot-no">Ya paré</button>
+    </div>
+    <form id="forgotForm" class="forgot-form" hidden>
+      <label>¿A qué hora paró?<input type="time" name="t" value="${timeOf(Math.min(Date.now(), timer.startedAt + 60 * 60000))}" required></label>
+      <button class="btn primary">Continuar</button>
+    </form>
+  </div>`;
+  sheet.showModal();
+  $("#forgotForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const [hh, mm] = e.target.t.value.split(":").map(Number);
+    const d = new Date();
+    d.setHours(hh, mm, 0, 0);
+    let end = d.getTime();
+    if (end > Date.now()) end -= 86400000; // fue ayer
+    if (end <= timer.startedAt) return toast(`El timer empezó a las ${timeOf(timer.startedAt)}`);
+    saveTimer({ ...timer, endOverride: end, pausedAt: end });
+    sheet.close();
+    go(`#/session/${b.id}/new`);
+  });
+}
+
+// ---------- Meta diaria y racha ----------
+function minutesByDay() {
+  const map = {};
+  for (const b of db.books) for (const s of b.sessions || []) map[s.date] = (map[s.date] || 0) + (s.minutes || 0);
+  if (timer && localDate(timer.startedAt) === today()) map[today()] = (map[today()] || 0) + elapsedMs(timer) / 60000;
+  return map;
+}
+function goalStats() {
+  const goal = settings.dailyGoal || 0;
+  const map = minutesByDay();
+  const todayMin = map[today()] || 0;
+  let streak = 0;
+  if (goal) {
+    const d = new Date();
+    if (todayMin < goal) d.setDate(d.getDate() - 1); // hoy todavía cuenta
+    while ((map[d.toLocaleDateString("en-CA")] || 0) >= goal) streak++, d.setDate(d.getDate() - 1);
+    if (todayMin >= goal && streak === 0) streak = 1;
+  }
+  return { goal, todayMin, streak };
+}
+function goalWidgetHtml() {
+  const { goal, todayMin, streak } = goalStats();
+  if (!goal) return `<button class="goal goal-empty" data-action="goal-set"><span>Ponerte una meta diaria de lectura</span><span aria-hidden="true">→</span></button>`;
+  const pct = Math.min(1, todayMin / goal);
+  const R = 20, C = 2 * Math.PI * R;
+  return `<button class="goal" data-action="goal-set" aria-label="Meta diaria: ${Math.round(todayMin)} de ${goal} minutos">
+    <svg viewBox="0 0 48 48" class="ring" aria-hidden="true"><circle cx="24" cy="24" r="${R}" class="ring-bg"/><circle cx="24" cy="24" r="${R}" class="ring-fg" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}"/></svg>
+    <span class="goal-text"><strong>${Math.round(todayMin)} de ${goal} min hoy</strong><span class="muted">${pct >= 1 ? "¡Meta cumplida!" : `Faltan ${Math.ceil(goal - todayMin)} min`}${streak ? ` · racha de ${streak} día${streak > 1 ? "s" : ""}` : ""}</span></span>
+  </button>`;
+}
+function openGoalSheet() {
+  const cur = settings.dailyGoal || 0;
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">Meta diaria</h2>
+    <p class="muted small">Minutos de lectura al día. Cada día que la cumple suma a la racha.</p>
+    <div class="goal-options">${[10, 15, 20, 30, 45, 60, 90].map((m) => `<button class="btn ${m === cur ? "primary" : ""}" data-goal="${m}">${m} min</button>`).join("")}</div>
+    ${cur ? `<button class="link danger-link" data-goal="0">Quitar la meta</button>` : ""}
+  </div>`;
+  sheet._candidate = null;
+  sheet.showModal();
+}
+
 // ---------- Compartir reseña como imagen ----------
 function loadImage(src) {
   return new Promise((res, rej) => {
@@ -1370,6 +1833,11 @@ async function loadSettings() {
     const { settings: remote } = await api("/api/settings");
     settings = { ...settings, ...remote };
     save("lib.settings", settings);
+    if (!timer && remote.activeTimer) {
+      timer = remote.activeTimer;
+      save("lib.timer", timer);
+      updateTimerPill();
+    }
   } catch {}
 }
 
@@ -1679,7 +2147,7 @@ function parseGoodreadsCsv(text) {
 
 // ---------- Eventos globales ----------
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work],[data-rate],#reviewText");
+  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work],[data-rate],[data-goal],#reviewText");
   if (!t) return;
 
   if (t.dataset.rate) {
@@ -1688,6 +2156,12 @@ document.addEventListener("click", (e) => {
     return setPicker(picker, +picker.dataset.value === v ? 0 : v);
   }
   if (t.id === "reviewText") return t.classList.remove("clamp");
+  if (t.dataset.goal != null) {
+    saveSettings({ dailyGoal: +t.dataset.goal || null });
+    sheet.close();
+    if (currentRoute === "shelf") rerenderSoft();
+    return;
+  }
 
   if (t.dataset.close != null) return t.closest("dialog")?.close();
   if (t.dataset.preview != null) return openPreview(lastResults[+t.dataset.preview]);
@@ -1713,6 +2187,57 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "timer-start":
+    case "timer-read": {
+      const b = getBook(view._book);
+      if (b) startTimer(b, { reading: t.dataset.action === "timer-read" });
+      return;
+    }
+    case "timer-pause":
+      return togglePause();
+    case "timer-finish":
+      if (timer) {
+        if (!timer.pausedAt) saveTimer({ ...timer, pausedAt: Date.now() });
+        go(`#/session/${timer.bookId}/new`);
+      }
+      return;
+    case "timer-resume-back":
+      if (timer) {
+        const { endOverride, ...rest } = timer;
+        // El tiempo en el formulario no cuenta como lectura
+        saveTimer(rest.pausedAt ? { ...rest, pausedMs: (rest.pausedMs || 0) + (Date.now() - rest.pausedAt), pausedAt: null } : rest);
+        go(`#/book/${timer.bookId}`);
+      }
+      return;
+    case "timer-discard":
+      if (timer && confirm("¿Descartar esta sesión? No se guardará el tiempo.")) {
+        const id = timer.bookId;
+        saveTimer(null);
+        setWakeLock(false);
+        go(`#/book/${id}`);
+      }
+      return;
+    case "session-delete": {
+      const id = location.hash.split("/")[2];
+      const b = getBook(id);
+      if (b && confirm("¿Eliminar esta sesión?")) {
+        upsert({ ...b, sessions: (b.sessions || []).filter((x) => x.id !== t.dataset.sid) });
+        toast("Sesión eliminada");
+        go(`#/book/${id}`);
+      }
+      return;
+    }
+    case "read-exit":
+      return go(timer ? `#/book/${timer.bookId}` : "#/shelf/reading");
+    case "forgot-yes":
+      saveTimer({ ...timer, confirmedAt: Date.now() });
+      return sheet.close();
+    case "forgot-no":
+      $("#forgotForm").hidden = false;
+      $(".forgot-actions").hidden = true;
+      return;
+    case "goal-set":
+      return openGoalSheet();
     case "share-review": {
       const b = getBook(view._book);
       if (b) shareReview(b, t);
@@ -1771,6 +2296,7 @@ $$("dialog").forEach((d) =>
   })
 );
 
+$("#timerPill").addEventListener("click", () => timer && go(`#/read/${timer.bookId}`));
 window.addEventListener("hashchange", route);
 window.addEventListener("online", () => {
   updateSyncBadge();
@@ -1781,6 +2307,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     sync();
     maybeAutoSyncGoodreads();
+    checkForgottenTimer();
+    tick();
   }
 });
 
