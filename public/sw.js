@@ -1,7 +1,7 @@
 // Service worker: la app abre sin conexión y las portadas quedan guardadas.
-const SHELL = "shell-v14";
+const SHELL = "shell-v15";
 const COVERS = "covers-v1";
-const ASSETS = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
+const ASSETS = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable.png", "/apple-touch-icon.png"];
 const COVER_HOSTS = ["covers.openlibrary.org", "books.google.com", "books.googleusercontent.com"];
 
 self.addEventListener("install", (e) => {
