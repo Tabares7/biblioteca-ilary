@@ -464,6 +464,7 @@ function renderShelf(status) {
           <p>${f ? "Nada coincide con esa búsqueda." : status === "all" ? EMPTY_ALL : SHELVES[status].empty}</p>
           ${f ? "" : `<a class="btn primary" href="#/add">Agregar un libro</a>`}
         </div>`;
+    if (viewMode === "spines") fillSpineColors();
   };
   drawShelf();
 }
@@ -543,24 +544,118 @@ function darkPanelHtml() {
   </section>`;
 }
 
-// Lomos: el ancho depende de las páginas; el alto y el tono, del título.
-const SPINE_TONES = [
-  ["#1f1f1f", "#f4f2ee"], ["#e9e5dd", "#1f1f1f"], ["#5b6b5d", "#f4f2ee"], ["#c9c2b4", "#1f1f1f"],
-  ["#3f4a5a", "#f4f2ee"], ["#a8553e", "#f4f2ee"], ["#d8d2c4", "#1f1f1f"], ["#7d7468", "#f4f2ee"],
-  ["#2e3b36", "#f4f2ee"], ["#b8a98a", "#1f1f1f"],
-];
+// Lomos: el color sale de la portada real; el ancho, de las páginas; el alto varía un poco.
+const SPINE_TONES = ["#2f4a3a", "#7a2e26", "#1f2f45", "#d9c9a8", "#5b3b5e", "#a8553e", "#3d5a6c", "#c9a13b", "#4a5a3a", "#8c6a4f", "#e6ddcc", "#2b2b2b"];
+const SPINE_TITLE_PX = 12.5;
+const SPINE_CHAR_PX = SPINE_TITLE_PX * 0.56;
+
+function textOn(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.62 ? "#1d1b19" : "#f7f3ec";
+}
+
+// Parte el título en 1 o 2 líneas según lo que cabe a lo alto del lomo
+function spineLines(title, capacity) {
+  const t = String(title).trim();
+  if (t.length <= capacity) return [t];
+  const words = t.split(/\s+/);
+  let best = [t.slice(0, capacity), t.slice(capacity)], bestScore = Infinity;
+  for (let i = 1; i < words.length; i++) {
+    const a = words.slice(0, i).join(" "), b = words.slice(i).join(" ");
+    const score = Math.max(a.length, b.length) + (a.length > capacity ? 50 : 0);
+    if (score < bestScore) (bestScore = score), (best = [a, b]);
+  }
+  return best;
+}
+
 function spineHtml(b) {
   const seed = hueOf(b.title + (b.authors || [])[0]);
   const pages = b.pages || 280;
-  const width = Math.round(Math.min(46, Math.max(24, 18 + pages / 22)));
-  const height = 148 + (seed % 5) * 9;
-  const [bg, fg] = SPINE_TONES[seed % SPINE_TONES.length];
+  let height = 168 + (seed % 5) * 7;
   const author = (b.authors || [])[0] || "";
   const surname = author.split(/\s+/).slice(-1)[0] || "";
-  return `<a class="spine" href="#/book/${b.id}" style="--w:${width}px;--hgt:${height}px;--sb:${bg};--sf:${fg}" aria-label="${esc(b.title)}${author ? ", de " + esc(author) : ""}">
-    <span class="spine-title">${esc(b.title)}</span>
+  const reserved = surname ? 26 + Math.min(64, surname.length * 7.5) : 26; // espacio del autor + márgenes
+  const capacity = Math.max(6, Math.floor((height - reserved) / SPINE_CHAR_PX));
+  const lines = spineLines(b.title, capacity);
+  const longest = Math.max(...lines.map((l) => l.length));
+  if (longest > capacity) height = Math.min(206, Math.ceil(reserved + longest * SPINE_CHAR_PX + 8));
+  let width = Math.round(Math.min(46, Math.max(28, 20 + pages / 24)));
+  if (lines.length === 2) width = Math.max(width, 40);
+  const known = b.spineColor || spineColorCache.get(b.id) || "";
+  const bg = /^#[0-9a-f]{6}$/i.test(known) ? known : SPINE_TONES[seed % SPINE_TONES.length];
+  return `<a class="spine" data-spine="${b.id}" href="#/book/${b.id}" style="--w:${width}px;--hgt:${height}px;--res:${Math.round(reserved + 6)}px;--sb:${bg};--sf:${textOn(bg)}" aria-label="${esc(b.title)}${author ? ", de " + esc(author) : ""}">
+    <span class="spine-title ${lines.length === 2 ? "two" : ""}">${lines.map((l) => `<span>${esc(l)}</span>`).join("")}</span>
     ${surname ? `<span class="spine-author">${esc(surname)}</span>` : ""}
   </a>`;
+}
+
+// Color dominante de una portada (se calcula una vez y se guarda en el libro)
+const spineColorTried = new Set();
+const spineColorCache = new Map();
+async function dominantColor(url) {
+  const img = await loadCoverForCanvas(url);
+  if (!img) return null;
+  const c = document.createElement("canvas");
+  c.width = 24;
+  c.height = 36;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, 24, 36);
+  const data = ctx.getImageData(0, 0, 24, 36).data;
+  const bins = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const sat = max ? (max - min) / max : 0;
+    // Los colores con algo de saturación pesan más que el blanco/negro del fondo
+    const w = 1 + sat * 2.5 - (max > 235 && sat < 0.12 ? 0.7 : 0) - (max < 22 ? 0.5 : 0);
+    const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+    const bin = bins.get(key) || { w: 0, r: 0, g: 0, b: 0 };
+    bin.w += w; bin.r += r * w; bin.g += g * w; bin.b += b * w;
+    bins.set(key, bin);
+  }
+  let top = null;
+  for (const bin of bins.values()) if (!top || bin.w > top.w) top = bin;
+  if (!top || top.w <= 0) return null;
+  let [r, g, b] = [top.r / top.w, top.g / top.w, top.b / top.w];
+  // Evitar blancos puros que se confundan con el fondo
+  const max = Math.max(r, g, b);
+  if (max > 232) [r, g, b] = [r, g, b].map((v) => v * (232 / max));
+  return "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("");
+}
+
+async function fillSpineColors() {
+  const todo = db.books.filter((b) => b.cover && !b.spineColor && !spineColorTried.has(b.id));
+  if (!todo.length || !navigator.onLine) return;
+  const updates = [];
+  const worker = async () => {
+    while (todo.length) {
+      const b = todo.shift();
+      spineColorTried.add(b.id);
+      try {
+        const color = await dominantColor(b.cover);
+        if (!color) continue;
+        updates.push([b.id, color]);
+        spineColorCache.set(b.id, color);
+        const el = document.querySelector(`[data-spine="${b.id}"]`);
+        if (el) el.style.setProperty("--sb", color), el.style.setProperty("--sf", textOn(color));
+      } catch {}
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  if (!updates.length) return;
+  // Guardar todo de una vez
+  const now = Date.now();
+  for (const [id, color] of updates) {
+    const b = getBook(id);
+    if (!b) continue;
+    const next = { ...b, spineColor: color, updatedAt: now };
+    Object.assign(b, next);
+    db.queue.push({ op: "upsert", book: next });
+  }
+  persist();
+  scheduleSync();
 }
 
 function cardHtml(b) {

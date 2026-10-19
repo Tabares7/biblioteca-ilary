@@ -643,3 +643,25 @@ body.has-pill .toast { bottom: calc(132px + env(safe-area-inset-bottom)); }
 .shelf.glass { background-origin: content-box; background-clip: padding-box; }
 .shelf.glass { background: linear-gradient(to top, var(--wood) 0 6px, transparent 6px) content-box, var(--glass); background-size: 100% var(--row), auto; background-repeat: repeat-y, no-repeat; }
 .shelf.glass { padding-bottom: 14px; }
+
+/* ---------- Lomos v2: más aire, color de portada, títulos legibles ---------- */
+.shelf { --row: 226px; gap: 0 5px; padding: 0 8px; }
+.shelf.glass { padding: 22px 14px 14px; }
+.spine {
+  padding: 14px 0 12px; border-radius: 3px 3px 2px 2px; outline: 0;
+  box-shadow: inset 2px 0 0 rgb(255 255 255 / .10), inset -2px 0 0 rgb(0 0 0 / .14), 0 1px 2px rgb(0 0 0 / .18);
+  background: linear-gradient(90deg, rgb(0 0 0 / .10), transparent 18%, transparent 82%, rgb(0 0 0 / .12)), var(--sb);
+}
+/* Bandas finas arriba y abajo, como un lomo de verdad */
+.spine::before, .spine::after { content: ""; position: absolute; left: 4px; right: 4px; height: 1px; background: currentColor; opacity: .22; }
+.spine::before { top: 7px; }
+.spine::after { bottom: 6px; }
+.spine-title {
+  display: block;
+  font-family: var(--sans); font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; line-height: 1.15;
+  max-height: calc(var(--hgt) - var(--res, 62px)); white-space: normal; overflow: visible;
+}
+.spine-title > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: calc(var(--hgt) - var(--res, 62px)); }
+.spine-title.two { font-size: 11.5px; }
+.spine-author { font-size: 7.5px; font-weight: 500; letter-spacing: .14em; opacity: .62; max-height: 66px; }
+.spine:hover, .spine:focus-visible { transform: translateY(-10px); }
