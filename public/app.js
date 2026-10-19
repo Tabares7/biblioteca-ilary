@@ -2367,7 +2367,7 @@ async function buildQuoteImage(b, q) {
   g.addColorStop(1, "#d4ccc1");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
-  const accent = b.spineColor || "#1d1b19";
+  const accent = "#fd3100";
   let size = q.text.length > 320 ? 38 : q.text.length > 180 ? 46 : 56;
   ctx.font = `500 ${size}px ${font}`;
   const lines = wrapLines(ctx, q.text, W - 220, Math.floor(700 / (size * 1.35)));
@@ -3746,7 +3746,7 @@ function drawStar(ctx, cx, cy, r, fill) {
     ctx.beginPath();
     ctx.rect(cx - r, cy - r, fill >= 1 ? 2 * r : r, 2 * r);
     ctx.clip();
-    ctx.fillStyle = "#161616";
+    ctx.fillStyle = "#fd3100";
     ctx.fill(path);
     ctx.restore();
   }
