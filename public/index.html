@@ -54,9 +54,13 @@
   <dialog id="scanDlg" class="sheet">
     <div class="sheet-inner">
       <button class="close" data-close aria-label="Cerrar">×</button>
-      <h2 class="sheet-title">Escanear ISBN</h2>
+      <h2 class="sheet-title">Cámara</h2>
       <div id="reader" class="reader"></div>
       <p id="scanMsg" class="muted center">Iniciando cámara…</p>
+      <div class="cam-actions">
+        <button type="button" class="btn primary" id="snapBtn">📷 Foto de la portada</button>
+        <label class="btn">Galería<input type="file" accept="image/*" id="camFile" hidden></label>
+      </div>
       <form id="isbnForm" class="searchbar">
         <input name="isbn" inputmode="numeric" placeholder="O escribe el ISBN" autocomplete="off">
         <button class="btn primary">Buscar</button>

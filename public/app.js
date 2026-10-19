@@ -770,7 +770,7 @@ function renderAdd(q) {
     <div class="add-actions">
       <button class="btn" data-action="scan">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V4h3M21 7V4h-3M3 17v3h3M21 17v3h-3M7 8v8M10 8v8M13 8v8M16 8v8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        Escanear código
+        Cámara
       </button>
       <a class="btn" href="#/manual">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
@@ -1204,12 +1204,12 @@ async function openScanner() {
       () => {}
     );
     if (!scanDlg.open) return stopScanner();
-    msg.textContent = "Apunta al código de barras de la contraportada";
+    msg.textContent = "Apunta al código de barras… o toma una foto de la portada";
   } catch (e) {
     console.warn(e);
     msg.textContent = navigator.onLine
-      ? "No se pudo abrir la cámara. Puedes escribir el ISBN abajo."
-      : "El escáner necesita conexión la primera vez. Escribe el ISBN abajo.";
+      ? "No se pudo abrir la cámara en vivo. Usa «Galería» para tomar o elegir una foto, o escribe el ISBN."
+      : "La cámara necesita conexión. Escribe el ISBN abajo.";
   }
 }
 
@@ -1240,6 +1240,27 @@ function lookupIsbn(isbn) {
 }
 
 scanDlg.addEventListener("close", stopScanner);
+async function useCameraPhoto(src) {
+  try {
+    const dataUrl = await imageToJpeg(src);
+    stopScanner();
+    scanDlg.close();
+    if (currentRoute !== "add") go("#/add");
+    setTimeout(() => identifyFromPhoto(dataUrl), 50);
+  } catch {
+    toast("No se pudo leer la foto");
+  }
+}
+$("#snapBtn").addEventListener("click", () => {
+  const v = $("#reader video");
+  if (v && v.videoWidth) useCameraPhoto(v);
+  else $("#camFile").click();
+});
+$("#camFile").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) useCameraPhoto(f);
+});
 $("#isbnForm").addEventListener("submit", (e) => {
   e.preventDefault();
   const val = e.target.isbn.value.replace(/[-\s]/g, "");
@@ -2274,6 +2295,8 @@ function openQuoteEditor(b, q = null) {
     <button class="close" data-close aria-label="Cerrar">×</button>
     <h2 class="sheet-title">${q ? "Editar cita" : "Guardar una cita"}</h2>
     <form id="qForm" class="form">
+      ${q ? "" : `<label class="btn ocr-btn">📷 Leerla de una foto de la página<input type="file" accept="image/*" capture="environment" id="ocrFile" hidden></label>
+      <div id="ocrBox"></div>`}
       <label>La frase<textarea name="text" rows="4" required placeholder="Escribe la frase tal como aparece…">${esc(q?.text)}</textarea></label>
       <div class="two">
         <label>Página<input name="page" type="number" min="0" inputmode="numeric" value="${esc(q?.page ?? (currentPage(b) || ""))}"></label>
@@ -2284,7 +2307,12 @@ function openQuoteEditor(b, q = null) {
   </div>`;
   sheet._candidate = null;
   if (!sheet.open) sheet.showModal();
-  setTimeout(() => $("#qForm textarea")?.focus(), 50);
+  if (q) setTimeout(() => $("#qForm textarea")?.focus(), 50);
+  $("#ocrFile")?.addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) quoteFromPhoto(f, b);
+  });
   $("#qForm").addEventListener("submit", (e) => {
     e.preventDefault();
     const f = e.target.elements;
@@ -3494,6 +3522,168 @@ function renderNotifications() {
   $$("[data-ntype]").forEach((cb) => cb.addEventListener("change", () => saveSettings({ notify: { ...notifyPrefs(), types: { ...notifyPrefs().types, [cb.dataset.ntype]: cb.checked } } })));
 }
 
+// ---------- Foto del libro (IA con visión) ----------
+// Reduce una imagen (de la cámara en vivo, un archivo o un dataURL) a JPEG liviano
+function imageToJpeg(source, max = 1280, quality = 0.78) {
+  const draw = (w, h, paint) => {
+    const scale = Math.min(1, max / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.round(w * scale);
+    c.height = Math.round(h * scale);
+    paint(c.getContext("2d"), c.width, c.height);
+    return c.toDataURL("image/jpeg", quality);
+  };
+  if (source instanceof HTMLVideoElement) return Promise.resolve(draw(source.videoWidth, source.videoHeight, (ctx, w, h) => ctx.drawImage(source, 0, 0, w, h)));
+  return new Promise((res, rej) => {
+    const url = source instanceof Blob ? URL.createObjectURL(source) : source;
+    const img = new Image();
+    img.onload = () => {
+      if (source instanceof Blob) URL.revokeObjectURL(url);
+      res(draw(img.naturalWidth, img.naturalHeight, (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h)));
+    };
+    img.onerror = rej;
+    img.src = url;
+  });
+}
+
+// Recorta la foto al formato de portada (2:3) para usarla como tapa
+function photoAsCover(dataUrl, width = 480) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const target = 2 / 3;
+      let sw = img.naturalWidth, sh = img.naturalHeight;
+      if (sw / sh > target) sw = sh * target;
+      else sh = sw / target;
+      const c = document.createElement("canvas");
+      c.width = width;
+      c.height = Math.round(width / target);
+      c.getContext("2d").drawImage(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, 0, 0, c.width, c.height);
+      res(c.toDataURL("image/jpeg", 0.8));
+    };
+    img.onerror = rej;
+    img.src = dataUrl;
+  });
+}
+
+const aiErrorText = (e) => (e?.message === "daily_limit" ? "Por hoy ya llegamos al límite de la IA. Mañana seguimos 💛" : e?.message === "ai_unavailable" ? "La IA todavía no está activada." : "No pude ahora. Inténtalo de nuevo.");
+
+let photoFlow = null; // { photo, ai, results }
+async function identifyFromPhoto(dataUrl) {
+  if (!navigator.onLine) return toast("Necesitas conexión para reconocer la foto");
+  photoFlow = { photo: dataUrl, ai: null, results: [] };
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <div class="photo-wait"><img src="${dataUrl}" alt=""><p><span class="trivia-dice spin">🔎</span> Mirando la portada…</p></div>
+  </div>`;
+  sheet._candidate = null;
+  if (!sheet.open) sheet.showModal();
+  try {
+    const ai = await api("/api/ai", { method: "POST", body: JSON.stringify({ mode: "identify", image: dataUrl }) });
+    if (!photoFlow || photoFlow.photo !== dataUrl) return;
+    if (!ai.isBook) {
+      sheet.innerHTML = `<div class="sheet-inner"><button class="close" data-close aria-label="Cerrar">×</button>
+        <h2 class="sheet-title">No reconocí un libro</h2><p class="muted small">Prueba con la portada más de frente y con buena luz, o con el código de barras.</p>
+        <div class="row-actions tight"><button class="btn primary" data-action="scan">Volver a intentar</button><a class="btn" href="#/manual">Agregar a mano</a></div></div>`;
+      return;
+    }
+    photoFlow.ai = ai;
+    let results = [];
+    try {
+      const q = ai.isbn && ai.isbn.length >= 10 ? ai.isbn : `${ai.title} ${ai.authors[0] || ""}`.trim();
+      results = (await searchBooks(q)).results;
+      if (!results.length && ai.isbn) results = (await searchBooks(`${ai.title} ${ai.authors[0] || ""}`)).results;
+    } catch {}
+    photoFlow.results = results.slice(0, 3);
+    showPhotoMatches();
+  } catch (e) {
+    sheet.innerHTML = `<div class="sheet-inner"><button class="close" data-close aria-label="Cerrar">×</button><p>${aiErrorText(e)}</p></div>`;
+  }
+}
+
+function showPhotoMatches() {
+  const { ai, results } = photoFlow;
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">¿Es este?</h2>
+    <p class="muted small">Leí: <strong>${esc(ai.title)}</strong>${ai.authors.length ? ` · ${esc(ai.authors.join(", "))}` : ""}</p>
+    <div class="photo-matches">${results
+      .map((c, i) => `<button class="result" data-photo-pick="${i}">${coverHtml(c, "cover sm")}<span class="result-text"><span class="result-title">${esc(c.title)}</span><span class="result-meta">${esc((c.authors || []).join(", "))}${c.year ? " · " + esc(c.year) : ""}${c.publisher ? " · " + esc(c.publisher) : ""}</span>${findInLibrary(c) ? `<span class="badge">Ya está en tu biblioteca</span>` : ""}</span></button>`)
+      .join("")}
+      <button class="result" data-photo-pick="-1"><span class="cover sm cover-fallback"><img src="${photoFlow.photo}" alt=""></span><span class="result-text"><span class="result-title">${results.length ? "Ninguno de estos" : "Crear con lo que leí"}</span><span class="result-meta">Uso los datos de la foto${results.length ? "" : " (no está en Google Books ni Open Library)"}</span></span></button>
+    </div>
+  </div>`;
+}
+
+async function choosePhotoMatch(i) {
+  const { ai, results, photo } = photoFlow;
+  let c;
+  if (i >= 0) {
+    c = { ...results[i] };
+    for (const k of ["subtitle", "publisher", "year", "isbn"]) if (!c[k] && ai[k]) c[k] = ai[k];
+    if (!c.language && ai.language) c.language = ai.language;
+  } else {
+    c = { title: ai.title, subtitle: ai.subtitle, authors: ai.authors, olAuthors: [], year: ai.year, pages: null, genres: [], publisher: ai.publisher, description: "", language: ai.language, isbn: ai.isbn, cover: "", olWorkKey: "", links: {}, source: "photo" };
+  }
+  const existing = findInLibrary(c);
+  if (existing) return (sheet.close(), go(`#/book/${existing.id}`), toast("Ese libro ya está en tu biblioteca"));
+  const mine = await photoAsCover(photo);
+  // Preguntar qué portada usar
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">¿Qué portada usamos?</h2>
+    <div class="cover-choice">
+      ${c.cover ? `<button class="cover-opt" data-cover-pick="found">${coverHtml(c, "cover")}<span>La encontrada</span></button>` : ""}
+      <button class="cover-opt" data-cover-pick="mine"><span class="cover"><img src="${mine}" alt=""></span><span>Mi foto</span></button>
+      ${c.cover ? "" : `<button class="cover-opt" data-cover-pick="none">${coverHtml({ title: c.title }, "cover")}<span>Sin foto</span></button>`}
+    </div>
+  </div>`;
+  photoFlow.candidate = c;
+  photoFlow.mine = mine;
+}
+
+function choosePhotoCover(which) {
+  const c = photoFlow.candidate;
+  if (which === "mine") c.cover = photoFlow.mine;
+  if (which === "none") c.cover = "";
+  photoFlow = null;
+  openPreview(c);
+}
+
+// ---------- Cita desde la foto de una página ----------
+async function quoteFromPhoto(file, b) {
+  const box = $("#ocrBox");
+  if (!box) return;
+  if (!navigator.onLine) return (box.innerHTML = `<p class="muted small">Necesitas conexión para leer la foto.</p>`);
+  box.innerHTML = `<p class="muted small"><span class="trivia-dice spin">🔎</span> Leyendo la página…</p>`;
+  try {
+    const image = await imageToJpeg(file, 1600, 0.82);
+    const r = await api("/api/ai", { method: "POST", body: JSON.stringify({ mode: "page", image }) });
+    const f = $("#qForm");
+    if (!f) return;
+    if (r.page) f.elements.page.value = r.page;
+    const sentences = r.text
+      .split(/\n{2,}/)
+      .flatMap((p, pi) => p.replace(/\s*\n\s*/g, " ").split(/(?<=[.!?…»"”])\s+(?=[«"“¿¡A-ZÁÉÍÓÚÑ0-9—–-])/).map((t) => ({ t: t.trim(), pi })))
+      .filter((x) => x.t);
+    box.innerHTML = `<p class="ob-label">Toca las frases que quieres guardar</p>
+      <div class="ocr-sents">${sentences.map((x, k) => `<button type="button" class="ocr-s" data-k="${k}" data-p="${x.pi}">${esc(x.t)}</button>`).join(" ")}</div>`;
+    const ta = f.elements.text;
+    const sync = () => {
+      const picked = $$(".ocr-s.on", box).map((el) => sentences[+el.dataset.k]);
+      ta.value = picked.map((x, i) => (i && picked[i - 1].pi !== x.pi ? "\n\n" : i ? " " : "") + x.t).join("");
+    };
+    box.addEventListener("click", (e) => {
+      const s = e.target.closest(".ocr-s");
+      if (!s) return;
+      s.classList.toggle("on");
+      sync();
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="muted small">${aiErrorText(e)}</p>`;
+  }
+}
+
 // ---------- Compartir reseña como imagen ----------
 function loadImage(src) {
   return new Promise((res, rej) => {
@@ -4037,7 +4227,7 @@ function parseGoodreadsCsv(text) {
 
 // ---------- Eventos globales ----------
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work],[data-rate],[data-goal],[data-challenge],.vbar,#reviewText");
+  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work],[data-rate],[data-goal],[data-challenge],[data-photo-pick],[data-cover-pick],.vbar,#reviewText");
   if (!t) return;
 
   if (t.dataset.rate) {
@@ -4046,6 +4236,8 @@ document.addEventListener("click", (e) => {
     return setPicker(picker, +picker.dataset.value === v ? 0 : v);
   }
   if (t.id === "reviewText") return t.classList.remove("clamp");
+  if (t.dataset.photoPick != null) return photoFlow && choosePhotoMatch(+t.dataset.photoPick);
+  if (t.dataset.coverPick) return photoFlow && choosePhotoCover(t.dataset.coverPick);
   if (t.classList.contains("vbar")) {
     $$(".vbar.tip").forEach((x) => x !== t && x.classList.remove("tip"));
     return t.classList.toggle("tip");
@@ -4081,6 +4273,7 @@ document.addEventListener("click", (e) => {
     case "back":
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
+      if (sheet.open) sheet.close();
       return openScanner();
     case "ch-accept": {
       const c = chSuggestions.get(t.dataset.id);

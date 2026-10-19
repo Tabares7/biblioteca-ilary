@@ -36,6 +36,45 @@ Propón 3 retos nuevos.`,
   };
 }
 
+export const IDENTIFY_SYSTEM = `Identificas libros a partir de una foto de su portada, contraportada o lomo. Lee con cuidado el texto visible.
+Responde SOLO con JSON:
+{"isBook":true,"title":"título exacto como aparece","subtitle":"","authors":["Nombre Apellido"],"isbn":"solo dígitos si se ve un ISBN o código de barras con números legibles, si no vacío","publisher":"","year":"","language":"código ISO 639-1 del idioma del texto (es, en…)","confidence":"alta|media|baja"}
+Si no hay un libro en la foto, responde {"isBook":false}. No inventes datos que no se lean o que no sepas con seguridad; deja vacío lo que no veas.`;
+
+export const PAGE_SYSTEM = `Transcribes exactamente el texto de una foto de una página de libro (OCR). Respeta la ortografía, los acentos y los signos del original; une las palabras cortadas con guion al final de línea; no traduzcas ni resumas. Ignora encabezados y pies repetidos (título del libro, capítulo), pero detecta el número de página si se ve.
+Responde SOLO con JSON: {"text":"texto de la página con párrafos separados por \\n\\n","page":número o null}`;
+
+function imageBlock(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) return null;
+  if (m[2].length > 3_000_000) return null; // ~2 MB
+  return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
+}
+
+function validIdentify(d) {
+  if (!d || d.isBook === false) return { isBook: false };
+  const title = clean(d.title, 200);
+  if (!title) return { isBook: false };
+  return {
+    isBook: true,
+    title,
+    subtitle: clean(d.subtitle, 200),
+    authors: (Array.isArray(d.authors) ? d.authors : []).map((a) => clean(a, 80)).filter(Boolean).slice(0, 4),
+    isbn: String(d.isbn || "").replace(/[^\dX]/gi, "").slice(0, 13),
+    publisher: clean(d.publisher, 100),
+    year: clean(d.year, 4).replace(/\D/g, ""),
+    language: clean(d.language, 5).toLowerCase(),
+    confidence: ["alta", "media", "baja"].includes(d.confidence) ? d.confidence : "media",
+  };
+}
+
+function validPage(d) {
+  const text = String(d?.text || "").replace(/\r/g, "").trim().slice(0, 6000);
+  if (!text) throw new Error("bad_page");
+  const page = parseInt(d.page, 10);
+  return { text, page: Number.isFinite(page) && page > 0 && page < 5000 ? page : null };
+}
+
 function validTrivia(data, count) {
   const qs = (data.questions || [])
     .filter((q) => q && typeof q.q === "string" && Array.isArray(q.options) && q.options.length === 4 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < 4)
@@ -77,6 +116,16 @@ export default async (req) => {
     prompt = challengesPrompt(body.profile || {}, body.recent || [], body.existing || []);
     validate = (d) => ({ challenges: validChallenges(d) });
     maxTokens = 800;
+  } else if (body.mode === "identify" || body.mode === "page") {
+    const img = imageBlock(body.image);
+    if (!img) return json({ error: "bad_image" }, 400);
+    const isPage = body.mode === "page";
+    prompt = {
+      system: isPage ? PAGE_SYSTEM : IDENTIFY_SYSTEM,
+      user: [img, { type: "text", text: isPage ? "Transcribe esta página." : "¿Qué libro es?" }],
+    };
+    validate = isPage ? validPage : validIdentify;
+    maxTokens = isPage ? 2500 : 500;
   } else return json({ error: "bad_mode" }, 400);
 
   if (!(await takeDailySlot())) return json({ error: "daily_limit" }, 429);

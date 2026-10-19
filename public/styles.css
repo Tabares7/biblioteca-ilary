@@ -973,3 +973,23 @@ body.onboarding .view { max-width: 520px; padding: 0 20px; }
 .ob-tick { width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 13px; color: transparent; flex: none; }
 .ob-ch-item.on { border-color: var(--ink); }
 .ob-ch-item.on .ob-tick { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+
+/* ---------- Cámara y foto del libro ---------- */
+.cam-actions { display: grid; grid-template-columns: 1.6fr 1fr; gap: 8px; margin: 4px 0 6px; }
+.cam-actions .btn { font-size: 14px; }
+.photo-wait { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 10px 0 6px; }
+.photo-wait img { width: 140px; aspect-ratio: 2/3; object-fit: cover; border-radius: 10px; box-shadow: var(--shadow); }
+.photo-wait p { margin: 0; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
+.photo-matches { display: flex; flex-direction: column; margin-top: 8px; }
+.photo-matches .cover-fallback img { width: 100%; height: 100%; object-fit: cover; }
+.cover-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; }
+.cover-opt { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; border-radius: 18px; border: 1.5px solid var(--glass-border); background: var(--glass); color: var(--ink); font: inherit; font-weight: 500; cursor: pointer; }
+.cover-opt:active { border-color: var(--ink); }
+.cover-opt .cover { width: 100%; max-width: 140px; }
+.cover-opt .cover img { width: 100%; height: 100%; object-fit: cover; }
+.ocr-btn { color: var(--ink) !important; font-size: 14px !important; }
+#ocrBox:empty { display: none; }
+.ocr-sents { line-height: 1.9; max-height: 260px; overflow-y: auto; padding: 4px 2px; }
+.ocr-s { display: inline; border: 0; background: none; padding: 2px 3px; border-radius: 5px; font: inherit; font-size: 15px; color: var(--ink-2); cursor: pointer; text-align: left; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.ocr-s.on { background: #f3dfa0; color: #1d1b19; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .ocr-s.on { background: #6b5822; color: #fff6dc; } }
