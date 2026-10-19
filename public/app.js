@@ -354,12 +354,12 @@ function changeStatus(b, s) {
 // ---------- Router ----------
 const view = $("#view");
 let currentRoute = "";
-let lastShelf = "reading";
+let lastShelf = "all";
 let routeSeq = 0;
 
 function route() {
   routeSeq++;
-  const [path, qs] = (location.hash.slice(1) || "/shelf/reading").split("?");
+  const [path, qs] = (location.hash.slice(1) || "/shelf/all").split("?");
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(qs || "");
   currentRoute = parts[0];
@@ -378,7 +378,7 @@ function route() {
 
   switch (parts[0]) {
     case "shelf":
-      lastShelf = SHELVES[parts[1]] ? parts[1] : "reading";
+      lastShelf = TABS[parts[1]] ? parts[1] : "all";
       return renderShelf(lastShelf);
     case "add":
       return renderAdd(params.get("q") || "");
@@ -399,7 +399,7 @@ function route() {
     case "author":
       return renderAuthor(decodeURIComponent(parts[1] || ""), parts[2] || "");
     default:
-      location.hash = "#/shelf/reading";
+      location.hash = "#/shelf/all";
   }
 }
 
@@ -422,63 +422,125 @@ function backButton() {
 
 // ---------- Vista: estanterías ----------
 let shelfFilter = "";
-let viewMode = load("lib.view", "spines");
+let viewMode = load("lib.view2", "covers");
+let drawShelf = null;
+const TABS = { all: "Todos", reading: "Leyendo", read: "Leídos", want: "Quiero leer", abandoned: "Abandonados" };
+const EMPTY_ALL = "Su biblioteca está vacía. Empieza agregando un libro.";
+
 function renderShelf(status) {
   window.scrollTo(0, 0);
-  const counts = {};
+  const counts = { all: db.books.length };
   db.books.forEach((b) => (counts[b.status] = (counts[b.status] || 0) + 1));
+  const filtering = !!shelfFilter.trim();
+  const qi = $("#q");
+  if (qi && qi.value !== shelfFilter) qi.value = shelfFilter;
   view.innerHTML = `
-    <div class="tabs" role="tablist">
-      ${Object.entries(SHELVES)
-        .map(
-          ([k, s]) =>
-            `<a href="#/shelf/${k}" role="tab" aria-selected="${k === status}" class="tab ${k === status ? "active" : ""}">${s.label}<span class="count">${counts[k] || 0}</span></a>`
-        )
-        .join("")}
-    </div>
-    ${status === "reading" ? goalWidgetHtml() : ""}
-    <div class="toolbar">
-      <input class="filter" type="search" placeholder="Filtrar por título o autor" value="${esc(shelfFilter)}" aria-label="Filtrar">
-      <div class="viewtoggle" role="group" aria-label="Vista">
-        <button data-viewmode="spines" aria-pressed="${viewMode === "spines"}" title="Estantería" aria-label="Estantería">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v15M9 6v13M13 3v16M17.5 6l2.5 13M3 20.5h18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        </button>
-        <button data-viewmode="covers" aria-pressed="${viewMode === "covers"}" title="Portadas" aria-label="Portadas">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="4" width="6.5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="14.5" width="6.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="14.5" width="6.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-        </button>
+    ${filtering ? "" : continueHtml()}
+    <section class="collection">
+      <div class="sec-head"><h2 class="h2">${filtering ? "Resultados" : "Colección"}</h2><span class="muted small" id="colCount"></span></div>
+      <div class="tabs" role="tablist">
+        ${Object.entries(TABS)
+          .map(([k, label]) => `<a href="#/shelf/${k}" role="tab" aria-selected="${k === status}" class="tab ${k === status ? "active" : ""}">${label}<span class="count">${counts[k] || 0}</span></a>`)
+          .join("")}
       </div>
-    </div>
-    <div id="grid"></div>`;
+      <div id="grid"></div>
+    </section>
+    ${filtering ? "" : darkPanelHtml()}`;
 
-  const draw = () => {
+  drawShelf = () => {
     const f = norm(shelfFilter);
-    const sortKey = { reading: "startedAt", read: "finishedAt", abandoned: "finishedAt", want: "addedAt" }[status];
+    const sortKey = { reading: "startedAt", read: "finishedAt", abandoned: "finishedAt", want: "addedAt", all: "addedAt" }[status];
     const list = db.books
-      .filter((b) => b.status === status)
+      .filter((b) => status === "all" || b.status === status)
       .filter((b) => !f || norm(b.title).includes(f) || (b.authors || []).some((a) => norm(a).includes(f)))
       .sort((a, b) => String(b[sortKey] || "").localeCompare(String(a[sortKey] || "")) || (b.updatedAt || 0) - (a.updatedAt || 0));
     const grid = $("#grid");
-    grid.className = list.length ? (viewMode === "spines" ? "shelf" : "grid") : "";
+    if (!grid) return;
+    $("#colCount").textContent = list.length ? `${list.length} libro${list.length > 1 ? "s" : ""}` : "";
+    grid.className = list.length ? (viewMode === "spines" ? "shelf glass" : "grid") : "";
     grid.innerHTML = list.length
       ? list.map(viewMode === "spines" ? spineHtml : cardHtml).join("")
       : `<div class="empty">
-          <p>${f ? "Nada coincide con ese filtro." : SHELVES[status].empty}</p>
+          <p>${f ? "Nada coincide con esa búsqueda." : status === "all" ? EMPTY_ALL : SHELVES[status].empty}</p>
           ${f ? "" : `<a class="btn primary" href="#/add">Agregar un libro</a>`}
         </div>`;
   };
-  $(".filter").addEventListener("input", (e) => {
-    shelfFilter = e.target.value;
-    draw();
-  });
-  $$("[data-viewmode]").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      viewMode = btn.dataset.viewmode;
-      save("lib.view", viewMode);
-      $$("[data-viewmode]").forEach((b) => b.setAttribute("aria-pressed", b === btn));
-      draw();
-    })
-  );
-  draw();
+  drawShelf();
+}
+
+function continueHtml() {
+  const list = db.books
+    .filter((b) => b.status === "reading")
+    .sort((a, b) => (timer?.bookId === b.id) - (timer?.bookId === a.id) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (!list.length) return "";
+  const card = (b) => {
+    const pct = Math.round(progressPct(b));
+    const active = timer && timer.bookId === b.id;
+    return `<article class="cont-card glass">
+      <a href="#/book/${b.id}" class="cont-cover">${coverHtml(b, "cover")}</a>
+      <div class="cont-body">
+        <a href="#/book/${b.id}" class="cont-title">${esc(b.title)}</a>
+        <span class="cont-author">${esc((b.authors || []).join(", "))}</span>
+        <span class="cont-progress"><span class="bar"><span style="width:${pct}%"></span></span><span>${pct}%</span></span>
+        ${
+          active
+            ? `<button class="pill-btn live" data-action="cont-open" data-id="${b.id}"><span class="pill-dot ${timer.pausedAt ? "paused" : ""}"></span><span data-clock>${fmtClock(elapsedMs(timer))}</span></button>`
+            : `<button class="pill-btn" data-action="cont-resume" data-id="${b.id}">Seguir leyendo</button>`
+        }
+      </div>
+    </article>`;
+  };
+  return `<section class="continue">
+    <div class="sec-head"><h2 class="h2">Continuar leyendo</h2>${list.length > 1 ? `<span class="muted small">${list.length}</span>` : ""}</div>
+    <div class="cont-row ${list.length > 1 ? "multi" : ""}">${list.map(card).join("")}</div>
+  </section>`;
+}
+
+function yearStats() {
+  const y = String(new Date().getFullYear());
+  const readThisYear = db.books.filter((b) => b.status === "read" && (b.finishedAt || "").startsWith(y));
+  const pages = readThisYear.reduce((a, b) => a + (b.pages || 0), 0);
+  let minutes = 0;
+  for (const b of db.books) for (const s of b.sessions || []) if ((s.date || "").startsWith(y)) minutes += s.minutes || 0;
+  return { y, books: readThisYear.length, pages, hours: minutes / 60 };
+}
+
+function darkPanelHtml() {
+  const { goal, todayMin, streak } = goalStats();
+  const ys = yearStats();
+  const recent = [...db.books].sort((a, b) => String(b.addedAt || "").localeCompare(String(a.addedAt || "")) || (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 10);
+  const pct = goal ? Math.min(100, (todayMin / goal) * 100) : 0;
+  const fmtN = (n) => Math.round(n).toLocaleString("es");
+  return `<section class="dark-panel">
+    <div class="dp-grid">
+      <button class="dp-tile" data-action="goal-set">
+        <span class="dp-label">Meta diaria</span>
+        ${
+          goal
+            ? `<span class="dp-big">${Math.round(todayMin)}<small>/${goal} min</small></span>
+               <span class="dp-bar"><span style="width:${pct.toFixed(0)}%"></span></span>
+               <span class="dp-sub">${pct >= 100 ? "¡Cumplida hoy!" : `Faltan ${Math.ceil(goal - todayMin)} min`}${streak ? ` · ${streak} día${streak > 1 ? "s" : ""} de racha` : ""}</span>`
+            : `<span class="dp-big muted-big">—</span><span class="dp-sub">Toca para ponerte una meta</span>`
+        }
+      </button>
+      <div class="dp-tile">
+        <span class="dp-label">En ${ys.y}</span>
+        <dl class="dp-rows">
+          <div><dt>Libros leídos</dt><dd>${ys.books}</dd></div>
+          <div><dt>Páginas</dt><dd>${fmtN(ys.pages)}</dd></div>
+          <div><dt>Horas leyendo</dt><dd>${ys.hours >= 10 ? fmtN(ys.hours) : ys.hours.toFixed(1).replace(".", ",").replace(",0", "")}</dd></div>
+        </dl>
+      </div>
+    </div>
+    ${
+      recent.length
+        ? `<div class="sec-head"><h2 class="h2">Agregados recientemente</h2><a href="#/shelf/all" class="dp-link">Todo</a></div>
+           <div class="recent-row">${recent
+             .map((b) => `<a class="recent" href="#/book/${b.id}">${coverHtml(b, "cover")}<span>${esc(b.title)}</span></a>`)
+             .join("")}</div>`
+        : ""
+    }
+  </section>`;
 }
 
 // Lomos: el ancho depende de las páginas; el alto y el tono, del título.
@@ -502,17 +564,20 @@ function spineHtml(b) {
 }
 
 function cardHtml(b) {
-  let sub = "";
-  if (b.status === "reading" && b.startedAt) sub = `Desde ${fmtDate(b.startedAt)}`;
-  if (b.status === "read" && b.finishedAt) sub = fmtDate(b.finishedAt);
-  if (b.rating && (b.status === "read" || b.status === "abandoned")) sub = `<span class="card-stars">★ ${fmtRating(b.rating)}</span>${sub ? " · " + sub : ""}`;
-  const showBar = b.status === "reading" && progressPct(b) > 0;
-  return `<a class="card" href="#/book/${b.id}">
+  let foot = "";
+  if (b.status === "reading") {
+    const pct = Math.round(progressPct(b));
+    foot = `<span class="tile-progress"><span>${pct}%</span><span class="bar"><span style="width:${pct}%"></span></span></span>`;
+  } else if (b.rating && (b.status === "read" || b.status === "abandoned")) {
+    foot = `<span class="tile-sub"><span class="card-stars">★ ${fmtRating(b.rating)}</span>${b.finishedAt ? " · " + fmtDate(b.finishedAt) : ""}</span>`;
+  } else if (b.status === "read" && b.finishedAt) foot = `<span class="tile-sub">${fmtDate(b.finishedAt)}</span>`;
+  else if (b.status === "want") foot = `<span class="tile-sub">Quiero leer</span>`;
+  else if (b.status === "abandoned") foot = `<span class="tile-sub">Abandonado</span>`;
+  return `<a class="card tile glass" href="#/book/${b.id}">
     ${coverHtml(b)}
-    ${showBar ? `<span class="card-bar"><span style="width:${progressPct(b).toFixed(1)}%"></span></span>` : ""}
     <span class="card-title">${esc(b.title)}</span>
     <span class="card-author">${esc((b.authors || []).join(", "))}</span>
-    ${sub ? `<span class="card-sub">${sub}</span>` : ""}
+    ${foot}
   </a>`;
 }
 
@@ -1354,7 +1419,7 @@ async function setWakeLock(on) {
 }
 
 function renderReadMode(b) {
-  if (!b) return go("#/shelf/reading");
+  if (!b) return go("#/shelf/all");
   if (!timer) return startTimer(b, { reading: true });
   if (timer.bookId !== b.id) return go(`#/read/${timer.bookId}`);
   document.body.classList.add("reading-mode");
@@ -1383,7 +1448,7 @@ function renderReadMode(b) {
 // sid: "new" (cerrar el timer), "manual" (anotar a mano) o el id de una sesión existente
 function renderSession(b, sid) {
   window.scrollTo(0, 0);
-  if (!b) return go("#/shelf/reading");
+  if (!b) return go("#/shelf/all");
   const fromTimer = sid === "new";
   if (fromTimer && (!timer || timer.bookId !== b.id)) return go(`#/book/${b.id}`);
   const existing = !fromTimer && sid !== "manual" ? (b.sessions || []).find((s) => s.id === sid) : null;
@@ -1678,17 +1743,17 @@ async function buildReviewImage(b) {
   c.width = W;
   c.height = H;
   const ctx = c.getContext("2d");
-  const serif = '"Newsreader", Georgia, serif';
+  const serif = '"Inter", system-ui, sans-serif';
   const sans = '"Inter", system-ui, sans-serif';
   try {
     await Promise.all([
-      document.fonts.load(`500 64px "Newsreader"`),
-      document.fonts.load(`italic 400 38px "Newsreader"`),
+      document.fonts.load(`600 58px "Inter"`),
+      document.fonts.load(`400 36px "Inter"`),
       document.fonts.load(`400 30px "Inter"`),
     ]);
   } catch {}
 
-  ctx.fillStyle = "#fbfaf8";
+  ctx.fillStyle = "#ebe6df";
   ctx.fillRect(0, 0, W, H);
 
   // Texto de la reseña (sin spoilers en la imagen)
@@ -1732,7 +1797,7 @@ async function buildReviewImage(b) {
 
   // Título y autor
   ctx.fillStyle = "#161616";
-  ctx.font = `500 58px ${serif}`;
+  ctx.font = `600 54px ${serif}`;
   const titleLines = wrapLines(ctx, b.title, W - 200, 2);
   titleLines.forEach((l) => {
     ctx.fillText(l, W / 2, y + 20);
@@ -1749,7 +1814,7 @@ async function buildReviewImage(b) {
   if (quote) {
     y += 40;
     ctx.fillStyle = "#2a2a2a";
-    ctx.font = `italic 400 38px ${serif}`;
+    ctx.font = `400 34px ${serif}`;
     const maxLines = Math.max(2, Math.floor((H - 130 - y) / 54));
     const lines = wrapLines(ctx, `“${quote}”`, W - 220, Math.min(maxLines, 5));
     lines.forEach((l) => {
@@ -1760,7 +1825,7 @@ async function buildReviewImage(b) {
 
   // Pie
   ctx.fillStyle = "#a8a49c";
-  ctx.font = `italic 400 28px ${serif}`;
+  ctx.font = `500 26px ${serif}`;
   const date = b.finishedAt ? " · " + fmtDate(b.finishedAt) : "";
   ctx.fillText("La biblioteca de Ilary" + date, W / 2, H - 64);
 
@@ -2187,6 +2252,16 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "cont-resume": {
+      const b = getBook(t.dataset.id);
+      if (b) startTimer(b, { reading: true });
+      return;
+    }
+    case "cont-open":
+      return go(`#/read/${t.dataset.id}`);
+    case "menu-goal":
+      sheet.close();
+      return setTimeout(openGoalSheet, 50);
     case "timer-start":
     case "timer-read": {
       const b = getBook(view._book);
@@ -2228,7 +2303,7 @@ document.addEventListener("click", (e) => {
       return;
     }
     case "read-exit":
-      return go(timer ? `#/book/${timer.bookId}` : "#/shelf/reading");
+      return go(timer ? `#/book/${timer.bookId}` : "#/shelf/all");
     case "forgot-yes":
       saveTimer({ ...timer, confirmedAt: Date.now() });
       return sheet.close();
@@ -2296,6 +2371,52 @@ $$("dialog").forEach((d) =>
   })
 );
 
+// ---------- Encabezado: búsqueda, vista y menú ----------
+const VIEW_ICONS = {
+  covers: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="4" width="6.5" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="14.5" width="6.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="14.5" width="6.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  spines: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v15M9 6v13M13 3v16M17.5 6l2.5 13M3 20.5h18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+};
+function paintViewBtn() {
+  const btn = $("#viewBtn");
+  btn.innerHTML = VIEW_ICONS[viewMode];
+  btn.title = viewMode === "covers" ? "Vista: portadas (toca para lomos)" : "Vista: lomos (toca para portadas)";
+}
+$("#viewBtn").addEventListener("click", () => {
+  viewMode = viewMode === "covers" ? "spines" : "covers";
+  save("lib.view2", viewMode);
+  paintViewBtn();
+  if (currentRoute === "shelf" && drawShelf) drawShelf();
+  else go("#/shelf/" + lastShelf);
+  toast(viewMode === "covers" ? "Vista de portadas" : "Vista de estantería");
+});
+paintViewBtn();
+
+const q = $("#q");
+q.addEventListener("input", () => {
+  const wasFiltering = !!shelfFilter.trim();
+  shelfFilter = q.value;
+  const isFiltering = !!shelfFilter.trim();
+  if (currentRoute !== "shelf") return go("#/shelf/all");
+  if (wasFiltering !== isFiltering) renderShelf(lastShelf), q.focus();
+  else drawShelf?.();
+});
+
+$("#menuBtn").addEventListener("click", () => {
+  const pending = db.queue.length;
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">Biblioteca de Ilary</h2>
+    <p class="muted small">${navigator.onLine ? (pending ? `${pending} cambio(s) por sincronizar` : "Todo sincronizado") : "Sin conexión · los cambios se guardan en el teléfono"}</p>
+    <nav class="menu-list">
+      <a href="#/add">Agregar un libro<span>→</span></a>
+      <button data-action="menu-goal">Meta diaria${settings.dailyGoal ? ` · ${settings.dailyGoal} min` : ""}<span>→</span></button>
+      <a href="#/goodreads">Goodreads${settings.grUser ? " · conectado" : ""}<span>→</span></a>
+    </nav>
+  </div>`;
+  sheet._candidate = null;
+  sheet.showModal();
+});
+
 $("#timerPill").addEventListener("click", () => timer && go(`#/read/${timer.bookId}`));
 window.addEventListener("hashchange", route);
 window.addEventListener("online", () => {
@@ -2319,4 +2440,7 @@ if ("serviceWorker" in navigator) {
 route();
 updateSyncBadge();
 sync();
-loadSettings().then(maybeAutoSyncGoodreads);
+loadSettings().then(() => {
+  if (currentRoute === "shelf") rerenderSoft();
+  maybeAutoSyncGoodreads();
+});

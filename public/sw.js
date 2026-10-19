@@ -1,5 +1,5 @@
 // Service worker: la app abre sin conexión y las portadas quedan guardadas.
-const SHELL = "shell-v5";
+const SHELL = "shell-v6";
 const COVERS = "covers-v1";
 const ASSETS = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 const COVER_HOSTS = ["covers.openlibrary.org", "books.google.com", "books.googleusercontent.com"];
