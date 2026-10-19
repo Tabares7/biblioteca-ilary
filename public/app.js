@@ -375,6 +375,7 @@ function changeStatus(b, s) {
   if ((s === "read" || s === "abandoned") && b.status === "reading" && !next.finishedAt) next.finishedAt = today();
   upsert(next);
   toast(`Movido a ${SHELVES[s].label}`);
+  evaluateChallenges();
 }
 
 // ---------- Router ----------
@@ -432,6 +433,12 @@ function route() {
       return renderTag(decodeURIComponent(parts[1] || ""));
     case "genre":
       return renderGenre(decodeURIComponent(parts[1] || ""));
+    case "challenges":
+      return renderChallenges();
+    case "trivia":
+      return renderTrivia(parts[1] === "book" ? "book" : "week", parts[2]);
+    case "notifications":
+      return renderNotifications();
     case "quotes":
       return renderQuotes(parts[1]);
     case "chat":
@@ -481,6 +488,7 @@ function renderShelf(status) {
   view.innerHTML = `
     ${filtering ? "" : continueHtml()}
     ${filtering ? "" : `<nav class="org-row" aria-label="Organizar">
+      <a class="org-pill glass" href="#/challenges">🎯 Retos</a>
       <a class="org-pill glass" href="#/organize/collections">▤ Colecciones</a>
       <a class="org-pill glass" href="#/organize/series">◫ Sagas</a>
       <a class="org-pill glass" href="#/organize/tags"># Etiquetas</a>
@@ -942,6 +950,8 @@ async function renderBook(id) {
       ${readingSectionHtml(b)}
 
       ${b.status !== "want" ? reviewSectionHtml(b) : ""}
+
+      ${triviaBookCardHtml(b)}
 
       ${quotesSectionHtml(b)}
 
@@ -1768,6 +1778,7 @@ function renderSession(b, sid) {
     upsert(next);
     if (fromTimer) saveTimer(null), setWakeLock(false);
     toast(finished ? "¡Libro terminado! 🎉" : "Sesión guardada");
+    setTimeout(evaluateChallenges, 2800);
     go(finished ? `#/review/${b.id}` : `#/book/${b.id}`);
   });
 }
@@ -1956,7 +1967,7 @@ function challengeHtml(year, booksRead) {
     const start = new Date(now.getFullYear(), 0, 1), end = new Date(now.getFullYear() + 1, 0, 1);
     const expected = goal * ((now - start) / (end - start));
     const diff = booksRead - expected;
-    pace = booksRead >= goal ? "¡Reto cumplido! 🎉" : Math.abs(diff) < 0.5 ? "Vas al día" : diff > 0 ? `Vas ${Math.round(diff)} libro${Math.round(diff) === 1 ? "" : "s"} adelantada` : `Vas ${Math.round(-diff)} libro${Math.round(-diff) === 1 ? "" : "s"} atrasada`;
+    pace = booksRead >= goal ? "¡Reto cumplido! 🎉" : Math.abs(diff) < 0.5 ? "Vas al día" : diff > 0 ? `Vas ${Math.round(diff)} libro${Math.round(diff) === 1 ? "" : "s"} adelantada 🚀` : diff > -3 ? `Vas ${Math.round(-diff)} libro${Math.round(-diff) === 1 ? "" : "s"} atrasadita` : "Hay tiempo de remontar 💪";
     const left = goal - booksRead;
     const weeksLeft = Math.max(1, (end - now) / (7 * 86400000));
     if (left > 0) pace += ` · ${(left / weeksLeft).toFixed(1).replace(".", ",")} por semana para lograrlo`;
@@ -2015,6 +2026,7 @@ function renderStats() {
     </div>
 
     ${statsYear !== "all" ? challengeHtml(statsYear, st.read.length) : ""}
+    ${statsYear === String(new Date().getFullYear()) ? `<a class="link small-link stats-ch-link" href="#/challenges">Ver retos del mes y temáticos →</a>` : ""}
 
     <div class="kpis">
       <div class="kpi glass"><span class="kpi-v">${st.read.length}</span><span class="kpi-l">libros</span></div>
@@ -2690,7 +2702,7 @@ function startOnboarding() {
   ob = {
     i: 0,
     needsKey: null,
-    d: { name: "Ilary", formats: [], langs: [], genres: [], groupBy: "none", view: "covers", autoShelves: true, dailyGoal: 20, yearGoals: {}, imported: 0 },
+    d: { name: "Ilary", formats: [], langs: [], genres: [], groupBy: "none", view: "covers", autoShelves: true, dailyGoal: 20, yearGoals: {}, imported: 0, challenges: [], notifyHour: 21, notifyOn: false },
   };
   document.body.classList.add("onboarding");
   // ¿El servidor pide contraseña?
@@ -2719,6 +2731,8 @@ const OB_STEPS = [
   { id: "reading" },
   { id: "organize" },
   { id: "goals" },
+  { id: "challenges" },
+  { id: "notify" },
   { id: "done" },
 ];
 const obSteps = () => OB_STEPS.filter((s) => !s.when || s.when());
@@ -2819,6 +2833,25 @@ function renderOnb() {
       ${late ? `<p class="ob-label">Y para ${year + 1}</p>${obChips("goalNext", opts(sugNext).map((n) => [String(n), `${n} libros`]), String(goalNext ?? ""), false)}` : ""}
       <p class="ob-hint">Pronto te propondré también retos del mes y retos temáticos.</p>
       ${nav()}`;
+  } else if (step === "challenges") {
+    const list = [...monthTemplates(curMonth()), ...themeTemplates(curYear()).slice(0, 6)];
+    ob.chList = new Map(list.map((c) => [c.id, c]));
+    body = `<h1 class="ob-title">Elige tus primeros retos</h1>
+      <p class="ob-text">Los que se pueden detectar se marcan solos cuando terminas el libro.</p>
+      <div class="ob-ch">${list
+        .map((c) => `<button type="button" class="ob-ch-item ${d.challenges.includes(c.id) ? "on" : ""}" data-chpick="${esc(c.id)}"><span class="ch-emoji">${esc(c.emoji)}</span><span><strong>${esc(c.title)}</strong><span class="muted small">${c.kind === "month" ? `Este mes` : `Durante ${curYear()}`}</span></span><span class="ob-tick">✓</span></button>`)
+        .join("")}</div>
+      <p class="ob-hint">Cada mes te propondré nuevos, y la IA puede inventarte algunos a tu medida.</p>
+      ${nav()}`;
+  } else if (step === "notify") {
+    const blocked = isIOS() && !isStandalone();
+    body = `<div class="ob-art">🔔</div>
+      <h1 class="ob-title">¿Te aviso para leer?</h1>
+      <p class="ob-text">Un recordatorio a tu hora si aún no cumpliste tu meta, y un aviso si tu racha está en peligro. Con cariño y sin agobiar.</p>
+      <p class="ob-label">¿A qué hora?</p>
+      ${obChips("notifyHour", HOURS.map((h) => [String(h), hourLabel(h)]), String(d.notifyHour), false)}
+      <p class="ob-err" id="obPushMsg">${blocked ? PUSH_ERRORS.install : ""}</p>
+      ${d.notifyOn ? nav("Continuar", { skip: false }) : `<div class="ob-nav"><button class="btn primary ob-next" data-ob="push" ${blocked ? "disabled" : ""}>Activar avisos</button><button class="link ob-skip" data-ob="skip">Ahora no</button></div>`}`;
   } else if (step === "done") {
     const bits = [
       d.imported ? `📚 ${d.imported} libros en tu biblioteca` : "📚 Una biblioteca nueva, lista para llenarse",
@@ -2827,6 +2860,8 @@ function renderOnb() {
       d.yearGoals[year + 1] ? `🎯 Reto ${year + 1}: ${d.yearGoals[year + 1]} libros` : "",
       d.groupBy !== "none" ? `🗂 Ordenada por ${d.groupBy === "genre" ? "género" : "autor"}` : "",
       d.genres.length ? `💛 ${d.genres.slice(0, 3).join(", ")}${d.genres.length > 3 ? "…" : ""}` : "",
+      d.challenges.length ? `🏁 ${d.challenges.length} reto${d.challenges.length > 1 ? "s" : ""} aceptado${d.challenges.length > 1 ? "s" : ""}` : "",
+      d.notifyOn ? `🔔 Te aviso a las ${hourLabel(d.notifyHour)}` : "",
     ].filter(Boolean);
     body = `<div class="ob-art big">✨</div>
       <h1 class="ob-title">Tu biblioteca está lista, ${esc(d.name)}</h1>
@@ -2858,12 +2893,20 @@ function bindOnb(step) {
         if (name === "dailyGoal") d.dailyGoal = +v;
         else if (name === "goalNow") d.yearGoals[new Date().getFullYear()] = +v;
         else if (name === "goalNext") d.yearGoals[new Date().getFullYear() + 1] = +v;
+        else if (name === "notifyHour") d.notifyHour = +v;
         else d[name] = v;
       }
     })
   );
   $$(".ob-view").forEach((b) => b.addEventListener("click", () => ((d.view = b.dataset.view), $$(".ob-view").forEach((x) => x.classList.toggle("on", x === b)))));
   $("#obAuto")?.addEventListener("change", (e) => (d.autoShelves = e.target.checked));
+  $$("[data-chpick]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.chpick;
+      d.challenges = d.challenges.includes(id) ? d.challenges.filter((x) => x !== id) : [...d.challenges, id];
+      b.classList.toggle("on");
+    })
+  );
   $("#obName")?.addEventListener("submit", (e) => (e.preventDefault(), obNext()));
   $("#obKey")?.addEventListener("submit", (e) => (e.preventDefault(), obNext()));
   $("#obGr")?.addEventListener("submit", (e) => (e.preventDefault(), obImport()));
@@ -2919,6 +2962,7 @@ async function obNext(skip = false) {
 
 async function finishOnboarding(returning = false) {
   const d = ob?.d;
+  const ob_chList = ob?.chList;
   ob = null;
   document.body.classList.remove("onboarding");
   save("lib.onboarded", true);
@@ -2935,6 +2979,10 @@ async function finishOnboarding(returning = false) {
       yearGoals: { ...(settings.yearGoals || {}), ...d.yearGoals },
       onboarded: true,
     });
+    for (const id of d.challenges) {
+      const c = ob_chList?.get(id);
+      if (c) acceptChallenge(c);
+    }
   }
   paintIdentity();
   toast(returning ? `¡Hola de nuevo, ${settings.name || "Ilary"}!` : "¡Bienvenida a tu biblioteca! 📚");
@@ -2959,8 +3007,493 @@ document.addEventListener("click", (e) => {
   else if (a === "skip") (ob.i++, renderOnb());
   else if (a === "back") (ob.i = Math.max(0, ob.i - 1), renderOnb());
   else if (a === "gr") obImport();
+  else if (a === "push") {
+    t.disabled = true;
+    t.textContent = "Activando…";
+    enablePush(ob.d.notifyHour).then((r) => {
+      if (!ob) return;
+      if (r === "ok") (ob.d.notifyOn = true), ob.i++, renderOnb();
+      else ($("#obPushMsg").textContent = PUSH_ERRORS[r] || PUSH_ERRORS.error), (t.disabled = false), (t.textContent = "Activar avisos");
+    });
+  }
   else if (a === "finish") finishOnboarding();
 });
+
+// ---------- Retos ----------
+const MONTH_NAMES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+const ymd = () => today();
+const curMonth = () => today().slice(0, 7);
+const curYear = () => today().slice(0, 4);
+
+function monthlyPace() {
+  const per = {};
+  for (const b of db.books) if (b.status === "read" && b.finishedAt) per[b.finishedAt.slice(0, 7)] = (per[b.finishedAt.slice(0, 7)] || 0) + 1;
+  const vals = Object.values(per);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / Math.max(6, vals.length) : 1;
+}
+
+function monthTemplates(period) {
+  const pace = monthlyPace();
+  const nBooks = Math.max(1, Math.round(pace * 1.25));
+  const m = +period.slice(5, 7);
+  const all = [
+    { code: "books", emoji: "📚", title: `Termina ${nBooks} libro${nBooks > 1 ? "s" : ""} este mes`, rule: { type: "booksInMonth", n: nBooks } },
+    { code: "hours", emoji: "⏳", title: "10 horas de lectura este mes", rule: { type: "minutesInMonth", n: 600 } },
+    { code: "days", emoji: "📅", title: "Lee 15 días distintos este mes", rule: { type: "daysInMonth", n: 15 } },
+    { code: "pages", emoji: "📄", title: "800 páginas este mes", rule: { type: "pagesInMonth", n: 800 } },
+    { code: "unfinished", emoji: "🔖", title: "Termina un libro que tenías empezado", rule: { type: "finishStarted", n: 1 } },
+  ];
+  // Rotar 3 sugerencias distintas cada mes
+  return [0, 1, 2].map((i) => all[(m + i * 2) % all.length]).map((t) => ({ ...t, id: `m:${period}:${t.code}`, kind: "month", period }));
+}
+
+const THEME_TEMPLATES = [
+  { code: "classic", emoji: "🏛", title: "Un clásico", desc: "Escrito antes de 1950", rule: { type: "theme", test: "classic" } },
+  { code: "long", emoji: "🧱", title: "Un libro de más de 500 páginas", desc: "Un ladrillo de los buenos", rule: { type: "theme", test: "long" } },
+  { code: "short", emoji: "🪶", title: "Uno de menos de 150 páginas", desc: "Para leer de un tirón", rule: { type: "theme", test: "short" } },
+  { code: "english", emoji: "🇬🇧", title: "Un libro en inglés", desc: "Se detecta por el idioma del libro", rule: { type: "theme", test: "english" } },
+  { code: "poetry", emoji: "🌙", title: "Un libro de poesía", desc: "", rule: { type: "theme", test: "poetry" } },
+  { code: "newauthor", emoji: "🌱", title: "Un autor que nunca habías leído", desc: "", rule: { type: "theme", test: "newAuthor" } },
+  { code: "thisyear", emoji: "🆕", title: "Un libro publicado este año", desc: "", rule: { type: "theme", test: "thisYear" } },
+  { code: "nonfiction", emoji: "🧭", title: "Un libro de no ficción", desc: "Biografía, ensayo, historia…", rule: { type: "theme", test: "nonfiction" } },
+  { code: "saga", emoji: "🗝", title: "Empieza una saga", desc: "Un libro #1 de una serie", rule: { type: "theme", test: "series1" } },
+  { code: "latam", emoji: "🌎", title: "Una autora o autor latinoamericano", desc: "Lo marcas tú al terminarlo", rule: { type: "manual" } },
+  { code: "reread", emoji: "🔁", title: "Relee un favorito", desc: "Lo marcas tú al terminarlo", rule: { type: "manual" } },
+  { code: "gift", emoji: "🎁", title: "Un libro que te regalaron", desc: "Lo marcas tú al terminarlo", rule: { type: "manual" } },
+];
+const themeTemplates = (year) => THEME_TEMPLATES.map((t) => ({ ...t, id: `t:${year}:${t.code}`, kind: "theme", period: year }));
+
+function themeMatches(test, b, readBefore) {
+  const g = genreOf(b);
+  const lang = String(b.language || "").toLowerCase();
+  switch (test) {
+    case "classic": return (+b.year && +b.year < 1950) || g === "Clásicos";
+    case "long": return (b.pages || 0) >= 500;
+    case "short": return b.pages > 0 && b.pages <= 150;
+    case "english": return lang === "en" || lang === "eng";
+    case "poetry": return g === "Poesía";
+    case "newAuthor": return !!(b.authors || [])[0] && !readBefore.has(norm(b.authors[0]));
+    case "thisYear": return String(b.year) === String(new Date(b.finishedAt + "T12:00").getFullYear());
+    case "nonfiction": return ["Biografías y memorias", "Ensayo", "Historia", "Filosofía", "Psicología", "Autoayuda"].includes(g);
+    case "series1": return b.series?.number === 1;
+  }
+  return false;
+}
+
+// Progreso de un reto: { value, target, done, bookId }
+function challengeProgress(c) {
+  const r = c.rule || {};
+  if (r.type === "manual" || c.kind === "ai") return { value: c.done ? 1 : 0, target: 1, done: !!c.done, bookId: c.bookId };
+  if (c.kind === "month") {
+    const inM = (d) => (d || "").startsWith(c.period);
+    const read = db.books.filter((b) => b.status === "read" && inM(b.finishedAt));
+    const sessions = db.books.flatMap((b) => (b.sessions || []).filter((s) => inM(s.date)));
+    let value = 0;
+    if (r.type === "booksInMonth") value = read.length;
+    if (r.type === "minutesInMonth") value = sessions.reduce((a, s) => a + (s.minutes || 0), 0);
+    if (r.type === "daysInMonth") value = new Set(sessions.filter((s) => s.minutes > 0).map((s) => s.date)).size;
+    if (r.type === "pagesInMonth") value = sessions.reduce((a, s) => a + Math.max(0, (s.toPage || 0) - (s.fromPage || 0)), 0) || read.reduce((a, b) => a + (b.pages || 0), 0);
+    if (r.type === "finishStarted") value = read.filter((b) => b.startedAt && b.startedAt < c.period + "-01").length;
+    return { value, target: r.n || 1, done: value >= (r.n || 1) };
+  }
+  if (r.type === "theme") {
+    const read = db.books.filter((b) => b.status === "read" && b.finishedAt).sort((a, b) => a.finishedAt.localeCompare(b.finishedAt));
+    const before = new Set();
+    for (const b of read) {
+      const a = norm((b.authors || [])[0]);
+      if (b.finishedAt.startsWith(c.period) && themeMatches(r.test, b, before)) return { value: 1, target: 1, done: true, bookId: b.id };
+      if (a) before.add(a);
+    }
+    return c.done ? { value: 1, target: 1, done: true, bookId: c.bookId } : { value: 0, target: 1, done: false };
+  }
+  return { value: 0, target: 1, done: false };
+}
+
+const challengeState = () => ({ accepted: [], dismissed: [], ...(settings.challenges || {}) });
+function saveChallengeState(st) {
+  saveSettings({ challenges: st });
+}
+function acceptChallenge(c) {
+  const st = challengeState();
+  if (st.accepted.some((x) => x.id === c.id)) return;
+  st.accepted = [...st.accepted, { id: c.id, kind: c.kind, period: c.period, emoji: c.emoji, title: c.title, desc: c.desc || "", rule: c.rule || { type: "manual" }, acceptedAt: today() }];
+  saveChallengeState(st);
+}
+function removeChallenge(id, dismiss = true) {
+  const st = challengeState();
+  st.accepted = st.accepted.filter((x) => x.id !== id);
+  if (dismiss) st.dismissed = [...new Set([...st.dismissed, id])].slice(-200);
+  saveChallengeState(st);
+}
+
+// Marca retos cumplidos y celebra los nuevos
+function evaluateChallenges() {
+  const st = challengeState();
+  let changed = false;
+  for (const c of st.accepted) {
+    if (c.done) continue;
+    const p = challengeProgress(c);
+    if (p.done) {
+      c.done = true;
+      c.doneAt = today();
+      if (p.bookId) c.bookId = p.bookId;
+      changed = true;
+      toast(`🎉 ¡Reto cumplido! ${c.title}`);
+    }
+  }
+  if (changed) saveChallengeState(st);
+}
+
+function challengeCardHtml(c, accepted) {
+  const p = accepted ? challengeProgress(c) : null;
+  const book = p?.bookId && getBook(p.bookId);
+  const pct = p ? Math.min(100, (p.value / p.target) * 100) : 0;
+  const fmtVal = (v) => (c.rule?.type === "minutesInMonth" ? `${Math.round(v / 60 * 10) / 10} h` : v);
+  return `<div class="ch-card glass ${p?.done ? "done" : ""}">
+    <span class="ch-emoji">${esc(c.emoji || "✨")}</span>
+    <div class="ch-main">
+      <strong>${esc(c.title)}</strong>
+      ${c.desc && !p?.done ? `<span class="muted small">${esc(c.desc)}</span>` : ""}
+      ${
+        accepted
+          ? p.done
+            ? `<span class="ch-ok">✓ Cumplido${book ? ` con <a href="#/book/${book.id}">${esc(book.title)}</a>` : ""}</span>`
+            : c.kind === "month"
+              ? `<span class="ch-prog"><span class="bar"><span style="width:${pct}%"></span></span><span>${fmtVal(p.value)} / ${fmtVal(p.target)}</span></span>`
+              : c.rule?.type === "theme"
+                ? `<span class="muted small">Se marca solo cuando termines uno</span>`
+                : `<button class="link small-link" data-action="ch-mark" data-id="${esc(c.id)}">Marcar como cumplido</button>`
+          : ""
+      }
+    </div>
+    ${
+      accepted
+        ? `<button class="ch-x" data-action="ch-remove" data-id="${esc(c.id)}" aria-label="Quitar reto">×</button>`
+        : `<div class="ch-btns"><button class="btn primary ch-accept" data-action="ch-accept" data-id="${esc(c.id)}">Aceptar</button><button class="ch-x" data-action="ch-dismiss" data-id="${esc(c.id)}" aria-label="Descartar">×</button></div>`
+    }
+  </div>`;
+}
+
+let chSuggestions = new Map(); // id -> reto sugerido (para aceptar)
+function renderChallenges() {
+  window.scrollTo(0, 0);
+  evaluateChallenges();
+  const st = challengeState();
+  const year = curYear(), period = curMonth();
+  const acceptedIds = new Set(st.accepted.map((c) => c.id));
+  const avail = (list) => list.filter((c) => !acceptedIds.has(c.id) && !st.dismissed.includes(c.id));
+  const monthAccepted = st.accepted.filter((c) => c.kind === "month" && c.period === period);
+  const yearAccepted = st.accepted.filter((c) => c.kind !== "month" && c.period === year);
+  const monthSug = avail(monthTemplates(period));
+  const themeSug = avail(themeTemplates(year)).slice(0, 4);
+  const aiSug = avail((settings.aiSuggestions?.items || []).map((x, i) => ({ ...x, id: x.id || `a:${year}:${settings.aiSuggestions.at}:${i}`, kind: "ai", period: year, rule: { type: "manual" } })));
+  chSuggestions = new Map([...monthSug, ...themeSug, ...aiSug].map((c) => [c.id, c]));
+  const readThisYear = db.books.filter((b) => b.status === "read" && (b.finishedAt || "").startsWith(year)).length;
+  const monthDone = monthAccepted.filter((c) => challengeProgress(c).done).length;
+  const yearDone = yearAccepted.filter((c) => challengeProgress(c).done).length;
+
+  view.innerHTML = `
+    <h1 class="page-title">Retos</h1>
+    ${triviaWeekCardHtml()}
+    ${challengeHtml(year, readThisYear)}
+
+    <section class="ch-sec">
+      <div class="sec-head"><h2 class="h2">${MONTH_NAMES[+period.slice(5, 7) - 1].replace(/^./, (c) => c.toUpperCase())}</h2>${monthAccepted.length ? `<span class="muted small">${monthDone} de ${monthAccepted.length}</span>` : ""}</div>
+      ${monthAccepted.map((c) => challengeCardHtml(c, true)).join("")}
+      ${monthSug.length ? `${monthAccepted.length ? `<p class="ob-label">Más para este mes</p>` : ""}${monthSug.map((c) => challengeCardHtml(c, false)).join("")}` : ""}
+    </section>
+
+    <section class="ch-sec">
+      <div class="sec-head"><h2 class="h2">Retos de ${year}</h2>${yearAccepted.length ? `<span class="muted small">${yearDone} de ${yearAccepted.length}</span>` : ""}</div>
+      ${yearAccepted.map((c) => challengeCardHtml(c, true)).join("") || `<p class="muted small">Acepta algunos de abajo. Los que se pueden detectar se marcan solos al terminar el libro.</p>`}
+      ${themeSug.length ? `<p class="ob-label">Ideas</p>${themeSug.map((c) => challengeCardHtml(c, false)).join("")}` : ""}
+    </section>
+
+    <section class="ch-sec">
+      <div class="sec-head"><h2 class="h2">Hechos para ti</h2></div>
+      ${aiSug.map((c) => challengeCardHtml(c, false)).join("")}
+      <button class="ask-ai glass ai-ch-btn" data-action="ch-ai"><span class="ai-dot">✦</span><span><strong>Proponme retos con IA</strong><span class="muted small">Según tus gustos y lo que has leído</span></span><span aria-hidden="true">→</span></button>
+    </section>`;
+}
+
+async function generateAIChallenges(btn) {
+  if (!navigator.onLine) return toast("Necesitas conexión");
+  btn.disabled = true;
+  btn.querySelector("strong").textContent = "Pensando retos para ti…";
+  const recent = db.books.filter((b) => b.status === "read").sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt))).slice(0, 15)
+    .map((b) => ({ title: b.title, author: (b.authors || [])[0] || "", rating: b.rating || 0, genre: genreOf(b) }));
+  try {
+    const data = await api("/api/ai", { method: "POST", body: JSON.stringify({ mode: "challenges", profile: settings.profile || {}, recent, existing: challengeState().accepted.map((c) => c.title) }) });
+    await saveSettings({ aiSuggestions: { at: Date.now(), items: data.challenges } });
+    renderChallenges();
+  } catch (e) {
+    toast(e.message === "daily_limit" ? "Por hoy ya llegamos al límite de la IA. Mañana seguimos 💛" : "No se pudo ahora. Inténtalo más tarde.");
+    btn.disabled = false;
+    btn.querySelector("strong").textContent = "Proponme retos con IA";
+  }
+}
+
+function openMarkSheet(id) {
+  const year = curYear();
+  const read = db.books.filter((b) => b.status === "read" && (b.finishedAt || "").startsWith(year)).sort((a, b) => b.finishedAt.localeCompare(a.finishedAt));
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">¿Con qué libro lo cumpliste?</h2>
+    <div class="menu-list">${read.map((b) => `<button data-action="ch-mark-book" data-id="${esc(id)}" data-book="${b.id}">${esc(b.title)}<span>${fmtDate(b.finishedAt)}</span></button>`).join("") || `<p class="muted small">Todavía no terminaste libros este año.</p>`}
+      <button data-action="ch-mark-book" data-id="${esc(id)}" data-book="">Lo cumplí, sin elegir libro<span>→</span></button>
+    </div>
+  </div>`;
+  sheet._candidate = null;
+  sheet.showModal();
+}
+
+// ---------- Trivias ----------
+function isoWeek(d = new Date()) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = t.getUTCDay() || 7;
+  t.setUTCDate(t.getUTCDate() + 4 - day);
+  const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  return `${t.getUTCFullYear()}-W${String(Math.ceil(((t - y0) / 86400000 + 1) / 7)).padStart(2, "0")}`;
+}
+function prevWeek(w) {
+  const [y, n] = w.split("-W").map(Number);
+  const d = new Date(Date.UTC(y, 0, 4 + (n - 1) * 7 - 7));
+  return isoWeek(new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+const triviaState = () => ({ streak: 0, best: 0, played: 0, ...(settings.trivia || {}) });
+
+function triviaWeekCardHtml() {
+  const t = triviaState();
+  const week = isoWeek();
+  const readCount = db.books.filter((b) => b.status === "read").length;
+  if (readCount < 2) return "";
+  const done = t.week === week && t.done;
+  return `<a class="trivia-card glass" href="#/trivia/week">
+    <span class="trivia-dice">🎲</span>
+    <span class="trivia-main"><strong>Trivia de la semana</strong><span class="muted small">${done ? `Hiciste ${t.score} de ${t.questions?.length || 5}${t.streak > 1 ? ` · racha de ${t.streak} semanas` : ""}` : `5 preguntas de libros que ya leíste${t.streak ? ` · racha de ${t.streak}` : ""}`}</span></span>
+    <span class="trivia-go">${done ? "✓" : "Jugar"}</span>
+  </a>`;
+}
+
+function triviaBookCardHtml(b) {
+  if (b.status !== "read") return "";
+  const t = b.trivia;
+  const done = t?.questions && t.answers?.length === t.questions.length;
+  return `<a class="trivia-card glass" href="#/trivia/book/${b.id}">
+    <span class="trivia-dice">🎲</span>
+    <span class="trivia-main"><strong>Trivia de este libro</strong><span class="muted small">${done ? `Hiciste ${t.score} de ${t.questions.length}` : "¿Cuánto recuerdas? 5 preguntas"}</span></span>
+    <span class="trivia-go">${done ? "Repasar" : "Jugar"}</span>
+  </a>`;
+}
+
+let quiz = null; // { kind, bookId, questions, answers, picked }
+async function renderTrivia(kind, id) {
+  window.scrollTo(0, 0);
+  const week = isoWeek();
+  let data = null;
+  if (kind === "book") {
+    const b = getBook(id);
+    if (!b) return go("#/shelf/all");
+    data = b.trivia;
+  } else {
+    const t = triviaState();
+    data = t.week === week ? t : null;
+  }
+  if (data?.questions?.length) {
+    quiz = { kind, bookId: id, week, questions: data.questions, answers: [...(data.answers || [])], score: data.score || 0 };
+    return drawQuiz();
+  }
+  // Generar
+  view.innerHTML = `${backButton()}<div class="quiz-loading"><span class="trivia-dice spin">🎲</span><p>Preparando tus preguntas…</p></div>`;
+  let books;
+  if (kind === "book") {
+    const b = getBook(id);
+    books = [{ title: b.title, authors: b.authors, year: b.year, finished: true }];
+  } else {
+    const read = db.books.filter((b) => b.status === "read");
+    const shuffled = read.map((b) => [Math.random() + (b.rating || 0) / 10 + (String(b.finishedAt) > String(Date.now() - 2e10) ? 0.2 : 0), b]).sort((a, b) => b[0] - a[0]).map((x) => x[1]);
+    books = shuffled.slice(0, 5).map((b) => ({ title: b.title, authors: b.authors, year: b.year, finished: true }));
+  }
+  try {
+    const res = await api("/api/ai", { method: "POST", body: JSON.stringify({ mode: "trivia", kind: kind === "week" ? "week" : "book", count: 5, books }) });
+    if (kind === "book") {
+      const b = getBook(id);
+      upsert({ ...b, trivia: { questions: res.questions, answers: [], score: 0, createdAt: Date.now() } });
+    } else {
+      await saveSettings({ trivia: { ...triviaState(), week, questions: res.questions, answers: [], score: 0, done: false } });
+    }
+    quiz = { kind, bookId: id, week, questions: res.questions, answers: [], score: 0 };
+    drawQuiz();
+  } catch (e) {
+    const msg = e.message === "daily_limit" ? "Por hoy ya llegamos al límite de la IA. Mañana seguimos 💛" : e.message === "ai_unavailable" ? "La IA todavía no está activada." : "No pude preparar la trivia ahora. Inténtalo más tarde.";
+    view.innerHTML = `${backButton()}<div class="empty"><p>${msg}</p></div>`;
+  }
+}
+
+function saveQuiz() {
+  const finished = quiz.answers.length === quiz.questions.length;
+  if (quiz.kind === "book") {
+    const b = getBook(quiz.bookId);
+    if (b) upsert({ ...b, trivia: { ...(b.trivia || {}), questions: quiz.questions, answers: quiz.answers, score: quiz.score, playedAt: finished ? Date.now() : b.trivia?.playedAt } });
+  } else {
+    const t = triviaState();
+    const patch = { ...t, week: quiz.week, questions: quiz.questions, answers: quiz.answers, score: quiz.score };
+    if (finished && !t.done) {
+      patch.done = true;
+      patch.played = (t.played || 0) + 1;
+      patch.streak = t.lastWeek === prevWeek(quiz.week) ? (t.streak || 0) + 1 : 1;
+      patch.best = Math.max(t.best || 0, quiz.score);
+      patch.lastWeek = quiz.week;
+    }
+    saveSettings({ trivia: patch });
+  }
+}
+
+function drawQuiz() {
+  const q = quiz;
+  const i = q.answers.length;
+  const total = q.questions.length;
+  const back = q.kind === "book" ? `#/book/${q.bookId}` : "#/challenges";
+  if (i >= total && q.picked == null) {
+    const msgs = q.score === total ? "¡Perfecto! Eres una lectora de memoria de elefante 🐘✨" : q.score >= total * 0.6 ? "¡Muy bien! Se nota que lo disfrutaste 💛" : "¡Buen intento! La próxima seguro te sale mejor 📚";
+    const t = triviaState();
+    view.innerHTML = `<div class="quiz">
+      <div class="quiz-end">
+        <span class="trivia-dice big">🎲</span>
+        <p class="quiz-score">${q.score}<small> de ${total}</small></p>
+        <p class="ob-text">${msgs}</p>
+        ${q.kind === "week" && t.streak ? `<p class="muted small">Racha de trivias: ${t.streak} semana${t.streak > 1 ? "s" : ""}</p>` : ""}
+        <div class="quiz-review">${q.questions.map((qq, k) => `<div class="qr ${q.answers[k] === qq.answer ? "ok" : "bad"}"><span>${q.answers[k] === qq.answer ? "✓" : "✗"}</span><span>${esc(qq.q)}<br><span class="muted small">${esc(qq.options[qq.answer])}</span></span></div>`).join("")}</div>
+        <a class="btn primary wide" href="${back}">Listo</a>
+      </div>
+    </div>`;
+    return;
+  }
+  const idx = q.picked != null ? i - 1 : i;
+  const cur = q.questions[idx];
+  const picked = q.picked;
+  view.innerHTML = `<div class="quiz">
+    <div class="quiz-top"><a class="back" href="${back}">←</a><div class="quiz-dots">${q.questions.map((_, k) => `<span class="${k < idx ? (q.answers[k] === q.questions[k].answer ? "ok" : "bad") : k === idx ? "on" : ""}"></span>`).join("")}</div><span class="muted small">${idx + 1}/${total}</span></div>
+    ${q.kind === "week" && cur.book ? `<p class="quiz-book">${esc(cur.book)}</p>` : ""}
+    <h1 class="quiz-q">${esc(cur.q)}</h1>
+    <div class="quiz-opts">${cur.options
+      .map((o, k) => {
+        let cls = "";
+        if (picked != null) cls = k === cur.answer ? "right" : k === picked ? "wrong" : "dim";
+        return `<button class="quiz-opt glass ${cls}" data-pick="${k}" ${picked != null ? "disabled" : ""}><span class="quiz-letter">${"ABCD"[k]}</span>${esc(o)}</button>`;
+      })
+      .join("")}</div>
+    ${picked != null ? `<div class="quiz-explain ${picked === cur.answer ? "ok" : "bad"}"><strong>${picked === cur.answer ? "¡Correcto! 🎉" : "Casi…"}</strong> ${esc(cur.explain || "")}</div>
+       <button class="btn primary wide quiz-next" data-action="quiz-next">${idx + 1 < total ? "Siguiente" : "Ver resultado"}</button>` : ""}
+  </div>`;
+  $$("[data-pick]").forEach((b) =>
+    b.addEventListener("click", () => {
+      if (quiz.picked != null) return;
+      const k = +b.dataset.pick;
+      quiz.picked = k;
+      quiz.answers.push(k);
+      if (k === cur.answer) quiz.score++;
+      navigator.vibrate?.(k === cur.answer ? 30 : [20, 40, 20]);
+      saveQuiz();
+      drawQuiz();
+    })
+  );
+}
+
+// ---------- Notificaciones push ----------
+const NOTIFY_TYPES = [
+  ["daily", "Recordatorio para leer", "A tu hora, si todavía no cumpliste tu meta"],
+  ["streak", "Racha en peligro", "Por la noche, si aún no leíste"],
+  ["weekly", "Cómo va tu reto", "Los domingos por la mañana"],
+  ["monthly", "Retos del mes nuevo", "El día 1 de cada mes"],
+  ["timer", "Timer olvidado", "Si lleva más de 2 horas corriendo"],
+];
+const notifyPrefs = () => ({ enabled: false, hour: 21, types: { daily: true, streak: true, weekly: true, monthly: true, timer: true }, ...(settings.notify || {}) });
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function urlB64ToUint8Array(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+// Pide permiso y registra este teléfono. Devuelve "ok" | motivo del fallo.
+async function enablePush(hour) {
+  if (isIOS() && !isStandalone()) return "install";
+  if (!pushSupported()) return "unsupported";
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return "denied";
+  try {
+    const { key } = await (await fetch("/api/push/key")).json();
+    if (!key) return "server";
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(key) });
+    await api("/api/push/subscribe", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
+    const prefs = notifyPrefs();
+    await saveSettings({ notify: { ...prefs, enabled: true, hour: hour ?? prefs.hour, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+    save("lib.pushOn", true);
+    return "ok";
+  } catch (e) {
+    console.warn("push", e);
+    return "error";
+  }
+}
+
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await api("/api/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
+      await sub.unsubscribe();
+    }
+  } catch {}
+  save("lib.pushOn", false);
+  await saveSettings({ notify: { ...notifyPrefs(), enabled: false } });
+}
+
+const PUSH_ERRORS = {
+  install: "Primero añade la app a tu pantalla de inicio (Compartir → Añadir a pantalla de inicio) y ábrela desde ahí.",
+  unsupported: "Este navegador no permite notificaciones.",
+  denied: "No diste permiso. Puedes activarlo en Ajustes → Notificaciones → Biblioteca.",
+  server: "Las notificaciones todavía no están configuradas en el servidor.",
+  error: "No se pudo activar ahora. Inténtalo de nuevo.",
+};
+const HOURS = [7, 9, 13, 18, 20, 21, 22, 23];
+const hourLabel = (h) => `${h % 12 || 12}${h < 12 ? " am" : " pm"}`;
+
+function renderNotifications() {
+  window.scrollTo(0, 0);
+  const p = notifyPrefs();
+  const onHere = load("lib.pushOn", false) && pushSupported() && Notification.permission === "granted";
+  view.innerHTML = `${backButton()}
+    <h1 class="page-title">Notificaciones</h1>
+    <section class="panel">
+      <p class="panel-title">${onHere ? "✓ Activadas en este teléfono" : p.enabled ? "Activadas en otro teléfono" : "Desactivadas"}</p>
+      <p class="small">Te escribo con cariño y sin agobiar: como mucho un par de avisos al día.</p>
+      <div class="row-actions tight">
+        ${onHere ? `<button class="btn" data-action="push-test">Enviarme una de prueba</button><button class="btn" data-action="push-off">Desactivar</button>` : `<button class="btn primary" data-action="push-on">Activar en este teléfono</button>`}
+      </div>
+      <p class="muted small" id="pushMsg"></p>
+    </section>
+    <section class="panel">
+      <p class="panel-title">¿A qué hora te recuerdo leer?</p>
+      ${obChips("hour", HOURS.map((h) => [String(h), hourLabel(h)]), String(p.hour), false)}
+    </section>
+    <section class="panel">
+      <p class="panel-title">Qué avisos quieres</p>
+      ${NOTIFY_TYPES.map(([k, l, d]) => `<label class="toggle-row"><span><strong>${l}</strong><span class="muted small">${d}</span></span><input type="checkbox" data-ntype="${k}" ${p.types[k] !== false ? "checked" : ""}></label>`).join("")}
+    </section>`;
+  $(".ob-chips[data-chips=hour]").addEventListener("click", (e) => {
+    const b = e.target.closest(".ob-chip");
+    if (!b) return;
+    $$(".ob-chips[data-chips=hour] .ob-chip").forEach((x) => x.classList.toggle("on", x === b));
+    saveSettings({ notify: { ...notifyPrefs(), hour: +b.dataset.v } });
+    toast(`Te recordaré a las ${hourLabel(+b.dataset.v)}`);
+  });
+  $$("[data-ntype]").forEach((cb) => cb.addEventListener("change", () => saveSettings({ notify: { ...notifyPrefs(), types: { ...notifyPrefs().types, [cb.dataset.ntype]: cb.checked } } })));
+}
 
 // ---------- Compartir reseña como imagen ----------
 function loadImage(src) {
@@ -3550,6 +4083,47 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "ch-accept": {
+      const c = chSuggestions.get(t.dataset.id);
+      if (c) acceptChallenge(c), toast(`Reto aceptado: ${c.title}`), rerenderSoft();
+      return;
+    }
+    case "ch-dismiss":
+      removeChallenge(t.dataset.id, true);
+      return rerenderSoft();
+    case "ch-remove":
+      if (confirm("¿Quitar este reto?")) removeChallenge(t.dataset.id, false), rerenderSoft();
+      return;
+    case "ch-mark":
+      return openMarkSheet(t.dataset.id);
+    case "ch-mark-book": {
+      const st = challengeState();
+      const c = st.accepted.find((x) => x.id === t.dataset.id);
+      if (c) Object.assign(c, { done: true, doneAt: today(), bookId: t.dataset.book || null }), saveChallengeState(st);
+      sheet.close();
+      toast("🎉 ¡Reto cumplido!");
+      return rerenderSoft();
+    }
+    case "ch-ai":
+      return generateAIChallenges(t);
+    case "quiz-next":
+      quiz.picked = null;
+      return drawQuiz();
+    case "push-on": {
+      t.disabled = true;
+      enablePush().then((r) => {
+        if (r === "ok") toast("¡Listo! Te avisaré con cariño 💛"), renderNotifications();
+        else ($("#pushMsg").textContent = PUSH_ERRORS[r] || PUSH_ERRORS.error), (t.disabled = false);
+      });
+      return;
+    }
+    case "push-off":
+      return disablePush().then(renderNotifications);
+    case "push-test":
+      api("/api/push/test", { method: "POST" })
+        .then((r) => toast(r.sent ? "Enviada. Debería llegarte en unos segundos" : "No hay teléfonos registrados"))
+        .catch(() => toast("No se pudo enviar"));
+      return;
     case "reset-app":
       sheet.close();
       return setTimeout(openResetSheet, 50);
@@ -3770,7 +4344,9 @@ $("#menuBtn").addEventListener("click", () => {
     <p class="muted small">${navigator.onLine ? (pending ? `${pending} cambio(s) por sincronizar` : "Todo sincronizado") : "Sin conexión · los cambios se guardan en el teléfono"}</p>
     <nav class="menu-list">
       <a href="#/add">Agregar un libro<span>→</span></a>
-      <a href="#/stats">Estadísticas y reto anual<span>→</span></a>
+      <a href="#/stats">Estadísticas<span>→</span></a>
+      <a href="#/challenges">Retos y trivias<span>→</span></a>
+      <a href="#/notifications">Notificaciones${notifyPrefs().enabled ? " · activadas" : ""}<span>→</span></a>
       <a href="#/organize">Colecciones, sagas y etiquetas<span>→</span></a>
       <a href="#/quotes">Citas favoritas<span>→</span></a>
       <button data-action="menu-goal">Meta diaria${settings.dailyGoal ? ` · ${settings.dailyGoal} min` : ""}<span>→</span></button>

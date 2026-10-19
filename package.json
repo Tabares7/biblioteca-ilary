@@ -6,6 +6,7 @@
   "description": "Biblioteca digital personal: libros leídos, leyendo y por leer.",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
-    "@netlify/blobs": "^11.1.4"
+    "@netlify/blobs": "^11.1.4",
+    "web-push": "^3.6.7"
   }
 }
