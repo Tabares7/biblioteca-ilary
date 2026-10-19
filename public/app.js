@@ -125,17 +125,42 @@ async function sync() {
   }
 }
 
-function askKey() {
+// Pide la contraseña con una hoja propia (prompt() no siempre aparece en la app instalada del iPhone)
+let keyRetry = null;
+function askKey(onDone) {
   updateSyncBadge();
-  if (askedKey) return;
-  askedKey = true;
-  const k = prompt("Escribe la contraseña de la biblioteca");
-  if (k) {
-    db.key = k.trim();
+  if (onDone) keyRetry = onDone;
+  const dlg = document.getElementById("keyDlg");
+  if (!dlg || dlg.open) return;
+  const wrong = !!db.key;
+  dlg.innerHTML = `<div class="sheet-inner">
+    <h2 class="sheet-title">Contraseña de la biblioteca</h2>
+    <p class="muted small">${wrong ? "Esa contraseña no es correcta. Inténtalo de nuevo." : "Escríbela una sola vez en este teléfono para guardar y sincronizar tus libros."}</p>
+    <form id="keyForm" class="searchbar">
+      <input name="k" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" placeholder="Contraseña" aria-label="Contraseña" required>
+      <button class="btn primary">Entrar</button>
+    </form>
+  </div>`;
+  dlg.showModal();
+  setTimeout(() => dlg.querySelector("input")?.focus(), 60);
+  dlg.querySelector("#keyForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const k = e.target.k.value.trim();
+    if (!k) return;
+    db.key = k;
     save("lib.key", db.key);
-    askedKey = false;
+    dlg.close();
+    try {
+      const r = await fetch("/api/settings", { headers: { "x-app-key": db.key } });
+      if (r.status === 401) return askKey();
+    } catch {}
+    toast("Contraseña guardada");
     sync();
-  }
+    loadSettings();
+    const retry = keyRetry;
+    keyRetry = null;
+    retry?.();
+  });
 }
 
 function updateSyncBadge() {
@@ -2430,7 +2455,13 @@ async function sendChat(bookId, text) {
         messages: msgs.slice(-16),
       }),
     });
-    if (r.status === 401) return askKey();
+    if (r.status === 401) {
+      askKey(() => {
+        if (currentRoute === "chat") renderChat(getBook(bookId));
+        sendChat(bookId, text);
+      });
+      throw new Error("unauthorized");
+    }
     if (!r.ok || !r.body) {
       const err = await r.json().catch(() => ({}));
       throw new Error(err.error || "HTTP " + r.status);
@@ -2446,10 +2477,11 @@ async function sendChat(bookId, text) {
       const box2 = $("#chatMsgs");
       if (box2) box2.scrollTop = box2.scrollHeight;
     }
+    if (!answer.trim()) throw new Error("empty");
     msgs.push({ role: "assistant", content: answer.trim() });
     save(chatKey(bookId), msgs.slice(-40));
   } catch (e) {
-    const msg = e.message === "ai_unavailable" ? "La IA todavía no está activada en Netlify." : "No se pudo responder ahora. Inténtalo de nuevo.";
+    const msg = e.message === "ai_unavailable" ? "La IA todavía no está activada en Netlify." : e.message === "unauthorized" ? "Escribe la contraseña de la biblioteca y vuelvo a preguntar." : "No se pudo responder ahora. Inténtalo de nuevo.";
     $("#pending")?.replaceWith(Object.assign(document.createElement("div"), { className: "bubble assistant error", textContent: msg }));
     msgs.pop();
     save(chatKey(bookId), msgs);
