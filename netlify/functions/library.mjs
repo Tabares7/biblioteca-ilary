@@ -73,6 +73,9 @@ export default async (req) => {
     await store.setJSON("backup-before-reset", { at: Date.now(), books, settings: (await store.get("settings", { type: "json" })) || {} });
     await store.delete(KEY);
     await store.delete("settings");
+    // También los teléfonos registrados para avisos y su historial
+    await store.delete("push-subs");
+    await store.delete("push-log");
     return json({ ok: true });
   }
 

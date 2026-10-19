@@ -2687,11 +2687,10 @@ function openResetSheet() {
 }
 
 // ---------- Recorrido de bienvenida ----------
-// Texto provisional: se reemplaza por la dedicatoria real.
 const DEDICATION = {
   title: "Para ti",
-  body: "Hice este lugar para que todos tus libros tengan casa: los que ya viviste, el que tienes entre manos y los que te están esperando.\n\nQue cada página te lleve lejos y siempre encuentres el camino de vuelta.",
-  sign: "Con amor",
+  body: "Creé este espacio para que guardes todos tus libros y los momentos que pasas con ellos. Los libros que ya viviste, los que tienes entre manos y los que faltan por llegar.\n\nEspero que la disfrutes mucho.",
+  sign: "Con mucho amor. Tu niño.",
 };
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const isStandalone = () => navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
