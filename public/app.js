@@ -129,6 +129,7 @@ async function sync() {
 let keyRetry = null;
 function askKey(onDone) {
   updateSyncBadge();
+  if (ob) return; // el recorrido de bienvenida pide la contraseña en su propio paso
   if (onDone) keyRetry = onDone;
   const dlg = document.getElementById("keyDlg");
   if (!dlg || dlg.open) return;
@@ -383,6 +384,7 @@ let lastShelf = "all";
 let routeSeq = 0;
 
 function route() {
+  if (ob) return renderOnb();
   routeSeq++;
   const [path, qs] = (location.hash.slice(1) || "/shelf/all").split("?");
   const parts = path.split("/").filter(Boolean);
@@ -428,6 +430,8 @@ function route() {
       return renderSeries(decodeURIComponent(parts[1] || ""));
     case "tag":
       return renderTag(decodeURIComponent(parts[1] || ""));
+    case "genre":
+      return renderGenre(decodeURIComponent(parts[1] || ""));
     case "quotes":
       return renderQuotes(parts[1]);
     case "chat":
@@ -484,6 +488,7 @@ function renderShelf(status) {
     </nav>`}
     <section class="collection">
       <div class="sec-head"><h2 class="h2">${filtering ? "Resultados" : "Colección"}</h2><span class="muted small" id="colCount"></span></div>
+      <div class="group-pick" role="group" aria-label="Agrupar">${[["none", "Sin agrupar"], ["genre", "Por género"], ["author", "Por autor"]].map(([k, l]) => `<button data-group="${k}" class="${(settings.groupBy || "none") === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <div class="tabs" role="tablist">
         ${Object.entries(TABS)
           .map(([k, label]) => `<a href="#/shelf/${k}" role="tab" aria-selected="${k === status}" class="tab ${k === status ? "active" : ""}">${label}<span class="count">${counts[k] || 0}</span></a>`)
@@ -503,15 +508,34 @@ function renderShelf(status) {
     const grid = $("#grid");
     if (!grid) return;
     $("#colCount").textContent = list.length ? `${list.length} libro${list.length > 1 ? "s" : ""}` : "";
-    grid.className = list.length ? (viewMode === "spines" ? "shelf glass" : "grid") : "";
+    const by = settings.groupBy || "none";
+    const itemHtml = viewMode === "spines" ? spineHtml : cardHtml;
+    const blockClass = viewMode === "spines" ? "shelf glass" : "grid";
+    if (list.length && by !== "none") {
+      grid.className = "groups";
+      grid.innerHTML = groupBooks(list, by)
+        .map(([label, books]) => `<section class="group"><h3 class="group-h">${esc(label)} <span class="muted">${books.length}</span></h3><div class="${blockClass}">${books.map(itemHtml).join("")}</div></section>`)
+        .join("");
+      if (viewMode === "spines") fillSpineColors();
+      if (by === "genre") enrichBooks();
+      return;
+    }
+    grid.className = list.length ? blockClass : "";
     grid.innerHTML = list.length
-      ? list.map(viewMode === "spines" ? spineHtml : cardHtml).join("")
+      ? list.map(itemHtml).join("")
       : `<div class="empty">
           <p>${f ? "Nada coincide con esa búsqueda." : status === "all" ? EMPTY_ALL : SHELVES[status].empty}</p>
           ${f ? "" : `<a class="btn primary" href="#/add">Agregar un libro</a>`}
         </div>`;
     if (viewMode === "spines") fillSpineColors();
   };
+  $$("[data-group]").forEach((b) =>
+    b.addEventListener("click", () => {
+      saveSettings({ groupBy: b.dataset.group });
+      $$("[data-group]").forEach((x) => x.classList.toggle("on", x === b));
+      drawShelf();
+    })
+  );
   drawShelf();
 }
 
@@ -2143,6 +2167,10 @@ function renderOrganize(tab) {
         const books = c.bookIds.map(getBook).filter(Boolean);
         return `<a class="org-item glass" href="#/collection/${c.id}">${mini(books)}<span><strong>${esc(c.name)}</strong><span class="muted small">${books.length} libro${books.length === 1 ? "" : "s"}</span></span></a>`;
       }).join("") || `<p class="muted small center">Crea listas propias: "Para releer", "Regalos", "Verano 2026"…</p>`}
+      ${settings.autoShelves !== false ? (() => {
+        const groups = groupBooks(db.books, "genre").filter(([g]) => g !== "Sin género");
+        return groups.length ? `<p class="ob-label org-auto-h">Estantes automáticos por género</p>` + groups.map(([g, books]) => `<a class="org-item glass" href="#/genre/${encodeURIComponent(g)}">${mini(books)}<span><strong>${esc(g)}</strong><span class="muted small">${books.length} libro${books.length === 1 ? "" : "s"} · automático</span></span></a>`).join("") : "";
+      })() : ""}
       <form id="newCol2" class="searchbar"><input name="n" placeholder="Nueva colección" autocomplete="off"><button class="btn primary">Crear</button></form>
     </div>`;
   } else if (organizeTab === "series") {
@@ -2481,7 +2509,7 @@ async function sendChat(bookId, text) {
     msgs.push({ role: "assistant", content: answer.trim() });
     save(chatKey(bookId), msgs.slice(-40));
   } catch (e) {
-    const msg = e.message === "ai_unavailable" ? "La IA todavía no está activada en Netlify." : e.message === "unauthorized" ? "Escribe la contraseña de la biblioteca y vuelvo a preguntar." : "No se pudo responder ahora. Inténtalo de nuevo.";
+    const msg = e.message === "daily_limit" ? "Por hoy ya llegamos al límite de preguntas. Mañana seguimos 💛" : e.message === "ai_unavailable" ? "La IA todavía no está activada en Netlify." : e.message === "unauthorized" ? "Escribe la contraseña de la biblioteca y vuelvo a preguntar." : "No se pudo responder ahora. Inténtalo de nuevo.";
     $("#pending")?.replaceWith(Object.assign(document.createElement("div"), { className: "bubble assistant error", textContent: msg }));
     msgs.pop();
     save(chatKey(bookId), msgs);
@@ -2510,6 +2538,429 @@ function openChatPageSheet(b) {
     renderChat(getBook(b.id));
   });
 }
+
+// ---------- Géneros: normalización y enriquecimiento ----------
+const GENRE_RULES = [
+  [/realismo m[aá]gico|magic(al)? realism/i, "Realismo mágico"],
+  [/science fiction|ciencia ficci|sci-?fi|dystop|distop/i, "Ciencia ficción"],
+  [/fantas/i, "Fantasía"],
+  [/romance|rom[aá]ntic|love stor|amor/i, "Romance"],
+  [/thriller|suspense|suspenso/i, "Thriller"],
+  [/myster|detective|crime|polic[ií]a|misterio|noir/i, "Misterio"],
+  [/horror|terror|gothic|g[oó]tic/i, "Terror"],
+  [/(histor.*(fiction|ficci|novel))|((fiction|ficci|novel).*histor)/i, "Ficción histórica"],
+  [/biograph|autobiograph|memoir|memorias|biograf/i, "Biografías y memorias"],
+  [/poet|poes[ií]a|poems/i, "Poesía"],
+  [/philosoph|filosof/i, "Filosofía"],
+  [/self-help|autoayuda|personal growth|desarrollo personal/i, "Autoayuda"],
+  [/psycholog|psicolog/i, "Psicología"],
+  [/juvenile|young adult|juvenil|\bya\b/i, "Juvenil"],
+  [/classic|cl[aá]sic/i, "Clásicos"],
+  [/essay|ensayo/i, "Ensayo"],
+  [/humor|comedy/i, "Humor"],
+  [/histor/i, "Historia"],
+  [/fiction|novel|ficci|novela|literary|literatura/i, "Novela"],
+];
+const GENRE_CHOICES = ["Novela", "Clásicos", "Realismo mágico", "Fantasía", "Ciencia ficción", "Romance", "Misterio", "Thriller", "Terror", "Ficción histórica", "Biografías y memorias", "Poesía", "Ensayo", "Filosofía", "Psicología", "Autoayuda", "Juvenil", "Humor"];
+function canonicalGenre(raw) {
+  for (const [re, name] of GENRE_RULES) if (re.test(raw)) return name;
+  return "";
+}
+// El género principal de un libro (o "" si no se sabe)
+function genreOf(b) {
+  for (const g of [...(b.genres || []), ...(b.tags || [])]) {
+    const c = canonicalGenre(String(g).replace(/-/g, " "));
+    if (c) return c;
+  }
+  const first = (b.genres || [])[0];
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : "";
+}
+
+// Completa géneros (y sinopsis/portada si faltan) de libros importados, una sola vez por libro
+const enrichTried = new Set();
+let enriching = false;
+async function enrichBooks(limit = 60) {
+  if (enriching || !navigator.onLine) return;
+  const todo = db.books.filter((b) => !b.enrichedAt && !(b.genres || []).length && !enrichTried.has(b.id)).slice(0, limit);
+  if (!todo.length) return;
+  enriching = true;
+  const now = Date.now();
+  const updates = [];
+  const worker = async () => {
+    while (todo.length) {
+      const b = todo.shift();
+      enrichTried.add(b.id);
+      try {
+        const q = b.isbn || `${b.title} ${(b.authors || [])[0] || ""}`;
+        const { results } = await searchBooks(q);
+        const hit = results.find((r) => (b.isbn && r.isbn === b.isbn) || bookKey(r) === bookKey(b)) || results[0];
+        const patch = { enrichedAt: today() };
+        if (hit) {
+          if (hit.genres?.length) patch.genres = hit.genres.slice(0, 4);
+          if (!b.description && hit.description) patch.description = hit.description;
+          if (!b.cover && hit.cover) patch.cover = hit.cover;
+          if (!b.pages && hit.pages) patch.pages = hit.pages;
+          if (!b.year && hit.year) patch.year = hit.year;
+          if (!b.language && hit.language) patch.language = hit.language;
+          if (!b.olWorkKey && hit.olWorkKey) patch.olWorkKey = hit.olWorkKey;
+        }
+        updates.push([b.id, patch]);
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  for (const [id, patch] of updates) {
+    const b = getBook(id);
+    if (!b) continue;
+    const next = { ...b, ...patch, updatedAt: now };
+    Object.assign(b, next);
+    db.queue.push({ op: "upsert", book: next });
+  }
+  enriching = false;
+  if (updates.length) {
+    persist();
+    scheduleSync();
+    if (currentRoute === "shelf" && settings.groupBy === "genre") drawShelf?.();
+  }
+}
+
+// Agrupa una lista por género o autor
+function groupBooks(list, by) {
+  const m = new Map();
+  for (const b of list) {
+    const k = by === "author" ? (b.authors || [])[0] || "Autor desconocido" : genreOf(b) || "Sin género";
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(b);
+  }
+  const unknown = by === "author" ? "Autor desconocido" : "Sin género";
+  return [...m.entries()].sort((a, b) => (a[0] === unknown) - (b[0] === unknown) || b[1].length - a[1].length || a[0].localeCompare(b[0]));
+}
+
+function renderGenre(name) {
+  window.scrollTo(0, 0);
+  const books = db.books.filter((b) => genreOf(b) === name);
+  renderBookList(name, `Estante automático · ${books.length} libro${books.length === 1 ? "" : "s"}`, books);
+}
+
+// ---------- Reinicio (para entregar la app vacía) ----------
+function openResetSheet() {
+  sheet.innerHTML = `<div class="sheet-inner">
+    <button class="close" data-close aria-label="Cerrar">×</button>
+    <h2 class="sheet-title">Reiniciar la app</h2>
+    <p class="small">Se borran <strong>todos los libros, reseñas, sesiones, citas, colecciones y ajustes</strong>, en este teléfono y en la nube. La próxima vez que se abra empezará el recorrido de bienvenida.</p>
+    <p class="muted small">Se guarda una copia de seguridad en el servidor por si hiciera falta recuperarla.</p>
+    <form id="resetForm" class="form">
+      <label>Para confirmar, escribe BORRAR<input name="c" autocomplete="off" autocapitalize="characters"></label>
+      <button class="btn danger" type="submit">Borrar todo</button>
+    </form>
+  </div>`;
+  sheet._candidate = null;
+  sheet.showModal();
+  $("#resetForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (e.target.c.value.trim().toUpperCase() !== "BORRAR") return toast("Escribe BORRAR para confirmar");
+    if (!navigator.onLine) return toast("Necesitas conexión para reiniciar");
+    try {
+      await api("/api/reset", { method: "POST", body: JSON.stringify({ confirm: "BORRAR" }) });
+      saveTimer(null);
+    } catch {
+      return toast("No se pudo reiniciar. Inténtalo de nuevo.");
+    }
+    try {
+      Object.keys(localStorage).filter((k) => k.startsWith("lib.")).forEach((k) => localStorage.removeItem(k));
+    } catch {}
+    location.replace("/");
+  });
+}
+
+// ---------- Recorrido de bienvenida ----------
+// Texto provisional: se reemplaza por la dedicatoria real.
+const DEDICATION = {
+  title: "Para ti",
+  body: "Hice este lugar para que todos tus libros tengan casa: los que ya viviste, el que tienes entre manos y los que te están esperando.\n\nQue cada página te lleve lejos y siempre encuentres el camino de vuelta.",
+  sign: "Con amor",
+};
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
+const needsOnboarding = () => !load("lib.onboarded", false) && !db.books.length && !db.queue.length;
+
+let ob = null;
+function startOnboarding() {
+  ob = {
+    i: 0,
+    needsKey: null,
+    d: { name: "Ilary", formats: [], langs: [], genres: [], groupBy: "none", view: "covers", autoShelves: true, dailyGoal: 20, yearGoals: {}, imported: 0 },
+  };
+  document.body.classList.add("onboarding");
+  // ¿El servidor pide contraseña?
+  fetch("/api/settings", { headers: { "x-app-key": db.key } })
+    .then(async (r) => {
+      ob.needsKey = r.status === 401;
+      if (r.ok) {
+        const { settings: remote } = await r.json();
+        settings = { ...settings, ...remote };
+        save("lib.settings", settings);
+        await sync();
+        if (remote.onboarded || db.books.length) return finishOnboarding(true);
+      }
+    })
+    .catch(() => (ob.needsKey = true))
+    .finally(() => ob && renderOnb());
+  renderOnb();
+}
+
+const OB_STEPS = [
+  { id: "install", when: () => isIOS() && !isStandalone() },
+  { id: "dedication" },
+  { id: "password", when: () => ob.needsKey !== false || ob.keyShown },
+  { id: "name" },
+  { id: "import" },
+  { id: "reading" },
+  { id: "organize" },
+  { id: "goals" },
+  { id: "done" },
+];
+const obSteps = () => OB_STEPS.filter((s) => !s.when || s.when());
+
+function obChips(name, options, selected, multi = true) {
+  return `<div class="ob-chips" data-chips="${name}" data-multi="${multi}">${options
+    .map(([v, l]) => `<button type="button" class="ob-chip ${(multi ? selected.includes(v) : selected === v) ? "on" : ""}" data-v="${esc(v)}">${esc(l)}</button>`)
+    .join("")}</div>`;
+}
+
+function readHistory() {
+  const y = new Date().getFullYear();
+  const per = {};
+  for (const b of db.books) if (b.status === "read" && b.finishedAt) per[b.finishedAt.slice(0, 4)] = (per[b.finishedAt.slice(0, 4)] || 0) + 1;
+  return { thisYear: per[y] || 0, lastYear: per[y - 1] || 0, per };
+}
+
+function renderOnb() {
+  if (!ob) return;
+  const steps = obSteps();
+  ob.i = Math.min(ob.i, steps.length - 1);
+  const step = steps[ob.i].id;
+  if (step === "password") ob.keyShown = true;
+  const d = ob.d;
+  const year = new Date().getFullYear();
+  const dots = `<div class="ob-dots">${steps.map((_, i) => `<span class="${i === ob.i ? "on" : i < ob.i ? "past" : ""}"></span>`).join("")}</div>`;
+  const nav = (next = "Continuar", { skip = true, disabled = false } = {}) => `<div class="ob-nav">
+    <button class="btn primary ob-next" data-ob="next" ${disabled ? "disabled" : ""}>${next}</button>
+    ${skip ? `<button class="link ob-skip" data-ob="skip">Ahora no</button>` : ""}
+  </div>`;
+  let body = "";
+
+  if (step === "install") {
+    body = `<div class="ob-art">📲</div>
+      <h1 class="ob-title">Ponla en tu pantalla de inicio</h1>
+      <p class="ob-text">Así se abre como una app de verdad, funciona sin conexión y puede avisarte de tus metas.</p>
+      <ol class="ob-steps"><li>Toca el botón <strong>Compartir</strong> <span class="ob-ico">⬆︎</span> abajo en Safari</li><li>Elige <strong>Añadir a pantalla de inicio</strong></li><li>Ábrela desde el ícono nuevo</li></ol>
+      ${nav("Seguir aquí por ahora", { skip: false })}`;
+  } else if (step === "dedication") {
+    body = `<div class="ob-letter glass">
+        <p class="ob-kicker">${esc(DEDICATION.title)}</p>
+        <p class="ob-letter-body">${esc(DEDICATION.body).replace(/\n/g, "<br>")}</p>
+        <p class="ob-sign">${esc(DEDICATION.sign)}</p>
+      </div>
+      ${nav("Empezar", { skip: false })}`;
+  } else if (step === "password") {
+    body = `<div class="ob-art">🔑</div>
+      <h1 class="ob-title">Tu llave</h1>
+      <p class="ob-text">Escribe la contraseña de tu biblioteca. Solo te la pediré esta vez.</p>
+      <form id="obKey" class="ob-form"><input name="k" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" placeholder="Contraseña" required><p class="ob-err" id="obErr"></p></form>
+      ${nav("Entrar", { skip: false })}`;
+  } else if (step === "name") {
+    body = `<h1 class="ob-title">¿Cómo te llamo?</h1>
+      <p class="ob-text">Así aparecerá en tu biblioteca.</p>
+      <form id="obName" class="ob-form"><input name="n" value="${esc(d.name)}" maxlength="24" autocomplete="given-name" placeholder="Tu nombre"></form>
+      ${nav("Continuar", { skip: false })}`;
+  } else if (step === "import") {
+    body = `<div class="ob-art">📚</div>
+      <h1 class="ob-title">¿Traemos tus libros?</h1>
+      <p class="ob-text">Si usas Goodreads, pega el enlace de tu perfil y traigo tus estanterías, notas, reseñas y fechas.</p>
+      <form id="obGr" class="ob-form"><input name="u" placeholder="goodreads.com/user/show/…" inputmode="url" autocomplete="off"><p class="ob-err" id="obGrMsg">${d.imported ? `✓ ${d.imported} libros importados` : ""}</p></form>
+      ${d.imported ? nav("Continuar", { skip: false }) : `<div class="ob-nav"><button class="btn primary ob-next" data-ob="gr">Conectar Goodreads</button><button class="link ob-skip" data-ob="skip">Empezar de cero</button></div>`}`;
+  } else if (step === "reading") {
+    body = `<h1 class="ob-title">Cuéntame cómo lees</h1>
+      <p class="ob-label">Lees en…</p>
+      ${obChips("formats", [["fisico", "📖 Papel"], ["ebook", "📱 PDF / ePub"], ["kindle", "Kindle"], ["audio", "🎧 Audiolibros"]], d.formats)}
+      <p class="ob-label">Idiomas</p>
+      ${obChips("langs", [["es", "Español"], ["en", "Inglés"], ["otros", "Otros"]], d.langs)}
+      <p class="ob-label">Tus géneros favoritos</p>
+      ${obChips("genres", GENRE_CHOICES.map((g) => [g, g]), d.genres)}
+      ${nav()}`;
+  } else if (step === "organize") {
+    body = `<h1 class="ob-title">¿Cómo ordenamos tu biblioteca?</h1>
+      <p class="ob-label">Agrupar la colección</p>
+      ${obChips("groupBy", [["none", "Por estado"], ["genre", "Por género"], ["author", "Por autor"]], d.groupBy, false)}
+      <p class="ob-label">Cómo verla</p>
+      <div class="ob-views">
+        <button type="button" class="ob-view ${d.view === "covers" ? "on" : ""}" data-view="covers"><span class="ob-view-art covers"><i></i><i></i><i></i><i></i></span>Portadas</button>
+        <button type="button" class="ob-view ${d.view === "spines" ? "on" : ""}" data-view="spines"><span class="ob-view-art spines"><i></i><i></i><i></i><i></i><i></i></span>Lomos</button>
+      </div>
+      <label class="check ob-check"><input type="checkbox" id="obAuto" ${d.autoShelves ? "checked" : ""}> Crear estantes automáticos por género</label>
+      ${nav()}`;
+  } else if (step === "goals") {
+    const h = readHistory();
+    const month = new Date().getMonth();
+    const late = month >= 9;
+    const base = h.lastYear || Math.round((h.thisYear / Math.max(1, month + 1)) * 12) || 12;
+    const sugNext = Math.max(6, Math.round(base * 1.15));
+    const sugNow = late ? h.thisYear + Math.max(1, Math.round(((base / 12) * (12 - month)) * 1.2)) : sugNext;
+    const opts = (center) => [...new Set([Math.max(1, center - 4), center, center + 4, center + 10])];
+    const goalNow = d.yearGoals[year] ?? null, goalNext = d.yearGoals[year + 1] ?? null;
+    body = `<h1 class="ob-title">Tus metas</h1>
+      <p class="ob-label">Minutos de lectura al día</p>
+      ${obChips("dailyGoal", [10, 15, 20, 30, 45, 60].map((m) => [String(m), `${m} min`]), String(d.dailyGoal), false)}
+      <p class="ob-label">Reto ${year}${h.thisYear ? ` · ya llevas ${h.thisYear}` : ""}</p>
+      ${h.lastYear ? `<p class="ob-hint">El año pasado leíste ${h.lastYear} libros.</p>` : ""}
+      ${obChips("goalNow", opts(sugNow).map((n) => [String(n), `${n} libros`]), String(goalNow ?? ""), false)}
+      ${late ? `<p class="ob-label">Y para ${year + 1}</p>${obChips("goalNext", opts(sugNext).map((n) => [String(n), `${n} libros`]), String(goalNext ?? ""), false)}` : ""}
+      <p class="ob-hint">Pronto te propondré también retos del mes y retos temáticos.</p>
+      ${nav()}`;
+  } else if (step === "done") {
+    const bits = [
+      d.imported ? `📚 ${d.imported} libros en tu biblioteca` : "📚 Una biblioteca nueva, lista para llenarse",
+      `⏱ ${d.dailyGoal} min de lectura al día`,
+      d.yearGoals[year] ? `🎯 Reto ${year}: ${d.yearGoals[year]} libros` : "",
+      d.yearGoals[year + 1] ? `🎯 Reto ${year + 1}: ${d.yearGoals[year + 1]} libros` : "",
+      d.groupBy !== "none" ? `🗂 Ordenada por ${d.groupBy === "genre" ? "género" : "autor"}` : "",
+      d.genres.length ? `💛 ${d.genres.slice(0, 3).join(", ")}${d.genres.length > 3 ? "…" : ""}` : "",
+    ].filter(Boolean);
+    body = `<div class="ob-art big">✨</div>
+      <h1 class="ob-title">Tu biblioteca está lista, ${esc(d.name)}</h1>
+      <ul class="ob-summary">${bits.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+      <div class="ob-nav"><button class="btn primary ob-next" data-ob="finish">Entrar a mi biblioteca</button></div>`;
+  }
+
+  view.innerHTML = `<div class="onb step-${step}">
+    <div class="ob-top">${ob.i > 0 && step !== "done" ? `<button class="back ob-back" data-ob="back" aria-label="Atrás">←</button>` : "<span></span>"}${dots}<span></span></div>
+    <div class="ob-body">${body}</div>
+  </div>`;
+  window.scrollTo(0, 0);
+  bindOnb(step);
+}
+
+function bindOnb(step) {
+  const d = ob.d;
+  $$(".ob-chips").forEach((box) =>
+    box.addEventListener("click", (e) => {
+      const btn = e.target.closest(".ob-chip");
+      if (!btn) return;
+      const name = box.dataset.chips, v = btn.dataset.v, multi = box.dataset.multi === "true";
+      if (multi) {
+        d[name] = d[name].includes(v) ? d[name].filter((x) => x !== v) : [...d[name], v];
+        btn.classList.toggle("on");
+      } else {
+        $$(".ob-chip", box).forEach((x) => x.classList.remove("on"));
+        btn.classList.add("on");
+        if (name === "dailyGoal") d.dailyGoal = +v;
+        else if (name === "goalNow") d.yearGoals[new Date().getFullYear()] = +v;
+        else if (name === "goalNext") d.yearGoals[new Date().getFullYear() + 1] = +v;
+        else d[name] = v;
+      }
+    })
+  );
+  $$(".ob-view").forEach((b) => b.addEventListener("click", () => ((d.view = b.dataset.view), $$(".ob-view").forEach((x) => x.classList.toggle("on", x === b)))));
+  $("#obAuto")?.addEventListener("change", (e) => (d.autoShelves = e.target.checked));
+  $("#obName")?.addEventListener("submit", (e) => (e.preventDefault(), obNext()));
+  $("#obKey")?.addEventListener("submit", (e) => (e.preventDefault(), obNext()));
+  $("#obGr")?.addEventListener("submit", (e) => (e.preventDefault(), obImport()));
+  if (step === "password" || step === "name") setTimeout(() => $(".ob-form input")?.focus(), 80);
+}
+
+async function obImport() {
+  const val = $("#obGr input")?.value.trim();
+  const msg = $("#obGrMsg");
+  if (!val) return msg && (msg.textContent = "Pega el enlace de tu perfil de Goodreads");
+  const btn = $('[data-ob="gr"]');
+  if (btn) (btn.disabled = true), (btn.textContent = "Trayendo tus libros…");
+  try {
+    const r = await goodreadsSync({ user: val });
+    ob.d.imported = db.books.length;
+    if (!r) throw new Error("x");
+    renderOnb();
+  } catch {
+    if (btn) (btn.disabled = false), (btn.textContent = "Conectar Goodreads");
+    const m = $("#obGrMsg");
+    if (m && !m.textContent) m.textContent = "No pude conectar. Revisa que el perfil sea público.";
+  }
+}
+
+async function obNext(skip = false) {
+  const steps = obSteps();
+  const step = steps[ob.i].id;
+  if (step === "password") {
+    const k = $("#obKey input")?.value.trim();
+    if (!k) return;
+    try {
+      const r = await fetch("/api/settings", { headers: { "x-app-key": k } });
+      if (r.status === 401) return ($("#obErr").textContent = "Esa contraseña no es correcta");
+      db.key = k;
+      save("lib.key", k);
+      ob.needsKey = false;
+      const { settings: remote } = await r.json();
+      settings = { ...settings, ...remote };
+      save("lib.settings", settings);
+      await sync();
+      // Otro teléfono de una biblioteca que ya existe: no repetir el recorrido
+      if (remote.onboarded || db.books.length) return finishOnboarding(true);
+    } catch {
+      return ($("#obErr").textContent = "Sin conexión. Inténtalo de nuevo.");
+    }
+    ob.i++;
+    return renderOnb();
+  }
+  if (step === "name") ob.d.name = ($("#obName input")?.value.trim() || "Ilary").slice(0, 24);
+  ob.i++;
+  renderOnb();
+}
+
+async function finishOnboarding(returning = false) {
+  const d = ob?.d;
+  ob = null;
+  document.body.classList.remove("onboarding");
+  save("lib.onboarded", true);
+  if (!returning && d) {
+    viewMode = d.view;
+    save("lib.view2", viewMode);
+    paintViewBtn();
+    await saveSettings({
+      name: d.name,
+      profile: { formats: d.formats, langs: d.langs, genres: d.genres },
+      groupBy: d.groupBy,
+      autoShelves: d.autoShelves,
+      dailyGoal: d.dailyGoal,
+      yearGoals: { ...(settings.yearGoals || {}), ...d.yearGoals },
+      onboarded: true,
+    });
+  }
+  paintIdentity();
+  toast(returning ? `¡Hola de nuevo, ${settings.name || "Ilary"}!` : "¡Bienvenida a tu biblioteca! 📚");
+  location.hash = "#/shelf/all";
+  route();
+  enrichBooks();
+}
+
+function paintIdentity() {
+  const name = settings.name || "Ilary";
+  const lbl = $(".pill-label");
+  if (lbl) lbl.textContent = `Biblioteca de ${name}`;
+  const av = $("#menuBtn");
+  if (av?.firstChild?.nodeType === 3) av.firstChild.nodeValue = name.charAt(0).toUpperCase();
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-ob]");
+  if (!t || !ob) return;
+  const a = t.dataset.ob;
+  if (a === "next") obNext();
+  else if (a === "skip") (ob.i++, renderOnb());
+  else if (a === "back") (ob.i = Math.max(0, ob.i - 1), renderOnb());
+  else if (a === "gr") obImport();
+  else if (a === "finish") finishOnboarding();
+});
 
 // ---------- Compartir reseña como imagen ----------
 function loadImage(src) {
@@ -3099,6 +3550,9 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "reset-app":
+      sheet.close();
+      return setTimeout(openResetSheet, 50);
     case "challenge-set":
       return openChallengeSheet(t.dataset.year);
     case "tag-remove": {
@@ -3321,6 +3775,7 @@ $("#menuBtn").addEventListener("click", () => {
       <a href="#/quotes">Citas favoritas<span>→</span></a>
       <button data-action="menu-goal">Meta diaria${settings.dailyGoal ? ` · ${settings.dailyGoal} min` : ""}<span>→</span></button>
       <a href="#/goodreads">Goodreads${settings.grUser ? " · conectado" : ""}<span>→</span></a>
+      <button data-action="reset-app" class="danger-link">Reiniciar la app…<span>→</span></button>
     </nav>
   </div>`;
   sheet._candidate = null;
@@ -3347,10 +3802,15 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("SW", e));
 }
 
-route();
+if (needsOnboarding()) startOnboarding();
+else route();
 updateSyncBadge();
+paintIdentity();
 sync();
 loadSettings().then(() => {
+  paintIdentity();
+  if (ob) return;
   if (currentRoute === "shelf") rerenderSoft();
   maybeAutoSyncGoodreads();
+  setTimeout(enrichBooks, 3000);
 });

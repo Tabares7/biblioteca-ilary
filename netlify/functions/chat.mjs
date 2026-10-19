@@ -2,10 +2,29 @@
 // Usa Netlify AI Gateway: el SDK de Anthropic recibe las credenciales solo
 // (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL). También funciona con una clave propia.
 import Anthropic from "@anthropic-ai/sdk";
+import { getStore } from "@netlify/blobs";
 
 const MODEL = process.env.AI_MODEL || "claude-sonnet-5-5";
 const MAX_MESSAGES = 16;
 const MAX_CHARS = 4000;
+const DAILY_LIMIT = 40;
+
+// Cuenta las preguntas del día (hora de Cuba/Nueva York) para no gastar de más.
+async function takeDailySlot() {
+  try {
+    const store = getStore({ name: "biblioteca", consistency: "strong" });
+    const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const key = "ai-usage";
+    const u = (await store.get(key, { type: "json" })) || {};
+    const count = u.day === day ? u.count || 0 : 0;
+    if (count >= DAILY_LIMIT) return false;
+    await store.setJSON(key, { day, count: count + 1 });
+    return true;
+  } catch (e) {
+    console.warn("usage counter", e?.message);
+    return true; // si falla el contador, no bloquear
+  }
+}
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -72,6 +91,8 @@ export default async (req) => {
     .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_CHARS) }));
   while (messages.length && messages[0].role !== "user") messages.shift();
   if (!messages.length || messages[messages.length - 1].role !== "user") return json({ error: "no_question" }, 400);
+
+  if (!(await takeDailySlot())) return json({ error: "daily_limit", limit: DAILY_LIMIT }, 429);
 
   const client = new Anthropic();
   const enc = new TextEncoder();

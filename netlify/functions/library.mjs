@@ -63,6 +63,19 @@ export default async (req) => {
     return json({ books });
   }
 
+  // Reinicio total (para entregar la app vacía). Exige confirmación explícita.
+  if (req.method === "POST" && pathname === "/api/reset") {
+    let body = {};
+    try {
+      body = JSON.parse((await req.text()) || "{}");
+    } catch {}
+    if (body.confirm !== "BORRAR") return json({ error: "confirm" }, 400);
+    await store.setJSON("backup-before-reset", { at: Date.now(), books, settings: (await store.get("settings", { type: "json" })) || {} });
+    await store.delete(KEY);
+    await store.delete("settings");
+    return json({ ok: true });
+  }
+
   // Ajustes compartidos entre dispositivos (p. ej. conexión con Goodreads)
   if (pathname === "/api/settings") {
     if (req.method === "GET") return json({ settings: (await store.get("settings", { type: "json" })) || {} });
@@ -84,4 +97,4 @@ export default async (req) => {
   return json({ error: "not_found" }, 404);
 };
 
-export const config = { path: ["/api/books", "/api/sync", "/api/settings"] };
+export const config = { path: ["/api/books", "/api/sync", "/api/settings", "/api/reset"] };
