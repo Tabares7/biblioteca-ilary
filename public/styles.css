@@ -339,3 +339,52 @@ h1, h2 { font-family: var(--serif); font-weight: 500; line-height: 1.15; margin:
 .help summary { cursor: pointer; color: var(--ink); }
 .help p { margin: 8px 0 0; }
 .row-actions.tight { margin-top: 14px; }
+
+/* ---------- Selector de estrellas ---------- */
+.picker { display: flex; align-items: center; gap: 12px; outline-offset: 4px; border-radius: 6px; }
+.pstars { display: flex; gap: 2px; }
+.pstar { position: relative; font-size: 30px; line-height: 1; color: var(--line); user-select: none; -webkit-user-select: none; }
+.pstar.on { color: var(--ink); }
+.pstar.half { background: linear-gradient(90deg, var(--ink) 50%, var(--line) 50%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.pstar button { position: absolute; top: -6px; bottom: -6px; width: 50%; padding: 0; border: 0; background: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.pstar button:first-of-type { left: 0; }
+.pstar button:last-of-type { right: 0; }
+.pval { font-size: 13px; color: var(--muted); }
+.picker.lg .pstar { font-size: 38px; }
+.picker.lg { flex-direction: column; align-items: flex-start; gap: 6px; }
+.picker.sm .pstar { font-size: 20px; }
+.picker.sm .pval { display: none; }
+
+/* ---------- Reseña en la ficha ---------- */
+.review-sec .picker { margin-bottom: 14px; }
+.review-sec .review { cursor: pointer; }
+.review.clamp { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+.spoiler-tag { display: inline-block; margin: 0 0 10px; font-size: 11.5px; font-weight: 500; letter-spacing: .04em; padding: 2px 9px; border-radius: 999px; background: #f6e3dc; color: #8a3a22; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .spoiler-tag { background: #3a2620; color: #f0b9a5; } }
+.parts { margin: 16px 0 0; display: flex; flex-direction: column; gap: 14px; }
+.parts dt { font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.parts dd { margin: 4px 0 0; white-space: pre-line; color: var(--ink-2); }
+.part-stars { text-transform: none; letter-spacing: 0; color: var(--ink); margin-left: 4px; }
+.card-stars { color: var(--ink); font-weight: 500; }
+
+/* ---------- Editor de reseña ---------- */
+.review-head { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
+.review-book { margin: 0; font-family: var(--serif); font-size: 19px; line-height: 1.25; }
+.review-head .small { margin: 2px 0 0; }
+.review-form { gap: 20px; }
+.review-input {
+  width: 100%; border: 0 !important; border-radius: 0 !important; padding: 4px 0 !important; background: transparent !important;
+  font-family: var(--serif); font-size: 19px !important; line-height: 1.6; resize: none; min-height: 160px; outline: none;
+}
+.review-input:focus-visible { outline: none; }
+.parts-edit { border-top: 1px solid var(--line); padding-top: 14px; }
+.parts-edit summary { cursor: pointer; font-weight: 500; }
+.part { margin-top: 18px; }
+.part-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.part textarea { width: 100%; min-height: 60px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); resize: none; color: var(--ink); }
+.check { flex-direction: row !important; align-items: center; gap: 10px !important; font-size: 14px !important; color: var(--ink) !important; }
+.check input { width: 20px; height: 20px; accent-color: var(--ink); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.share-preview { width: 100%; max-width: 360px; margin: 0 auto 14px; border-radius: 10px; box-shadow: var(--shadow); border: 1px solid var(--line); }
+.status-buttons.two-cols { grid-template-columns: 1fr 1fr; margin-top: 6px; }
+.status-buttons.two-cols > :only-child { grid-column: 1 / -1; }

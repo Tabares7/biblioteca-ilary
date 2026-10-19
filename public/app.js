@@ -382,6 +382,8 @@ function route() {
       return renderBook(parts[1]);
     case "goodreads":
       return renderGoodreads();
+    case "review":
+      return renderReview(getBook(parts[1]));
     case "author":
       return renderAuthor(decodeURIComponent(parts[1] || ""), parts[2] || "");
     default:
@@ -490,6 +492,7 @@ function cardHtml(b) {
   let sub = "";
   if (b.status === "reading" && b.startedAt) sub = `Desde ${fmtDate(b.startedAt)}`;
   if (b.status === "read" && b.finishedAt) sub = fmtDate(b.finishedAt);
+  if (b.rating && (b.status === "read" || b.status === "abandoned")) sub = `<span class="card-stars">★ ${fmtRating(b.rating)}</span>${sub ? " · " + sub : ""}`;
   return `<a class="card" href="#/book/${b.id}">
     ${coverHtml(b)}
     <span class="card-title">${esc(b.title)}</span>
@@ -670,7 +673,7 @@ async function renderBook(id) {
           <h1>${esc(b.title)}</h1>
           ${b.subtitle ? `<p class="sub">${esc(b.subtitle)}</p>` : ""}
           <p class="authors">${authorLinks(b) || `<span class="muted">Autor desconocido</span>`}</p>
-          ${b.rating ? starsHtml(b.rating) : ""}
+          <div id="heroStars">${b.rating ? starsHtml(b.rating) : ""}</div>
         </div>
       </div>
 
@@ -690,7 +693,7 @@ async function renderBook(id) {
           : ""
       }
 
-      ${b.review ? `<section><h2 class="section">Su reseña</h2><p class="review">${esc(b.review)}</p></section>` : ""}
+      ${b.status !== "want" ? reviewSectionHtml(b) : ""}
 
       ${(b.tags || []).length ? `<div class="tags">${b.tags.map((t) => `<span>${esc(t.replace(/-/g, " "))}</span>`).join("")}</div>` : ""}
 
@@ -712,6 +715,7 @@ async function renderBook(id) {
     </article>`;
 
   view._book = b.id;
+  $$(".picker", view).forEach(paintPicker);
 
   const descEl = $("#bdesc");
   if (descEl && descEl.scrollHeight <= descEl.clientHeight + 2) $('[data-action="more"]')?.remove();
@@ -984,6 +988,357 @@ function starsHtml(r) {
   let out = "";
   for (let i = 0; i < 5; i++) out += `<span class="${i < full ? "on" : i === full && half ? "half" : ""}">★</span>`;
   return `<p class="stars" aria-label="${r} de 5 estrellas">${out}</p>`;
+}
+
+// ---------- Reseñas ----------
+const REVIEW_PARTS = [
+  ["characters", "Personajes"],
+  ["plot", "Trama"],
+  ["ending", "Final"],
+  ["style", "Estilo y escritura"],
+];
+const fmtRating = (r) => String(r).replace(".", ",");
+const ratingWords = { 0.5: "Horrible", 1: "Muy malo", 1.5: "Malo", 2: "Flojo", 2.5: "Regular", 3: "Bueno", 3.5: "Muy bueno", 4: "Genial", 4.5: "Increíble", 5: "Obra maestra" };
+
+function starPicker(value, key, size = "") {
+  let h = `<div class="picker ${size}" data-picker="${key}" data-value="${value || 0}" role="slider" tabindex="0"
+    aria-label="Puntuación" aria-valuemin="0" aria-valuemax="5" aria-valuenow="${value || 0}"><span class="pstars">`;
+  for (let i = 1; i <= 5; i++) {
+    h += `<span class="pstar" data-i="${i}">★<button type="button" data-rate="${i - 0.5}" aria-label="${fmtRating(i - 0.5)} estrellas" tabindex="-1"></button><button type="button" data-rate="${i}" aria-label="${i} estrellas" tabindex="-1"></button></span>`;
+  }
+  return h + `</span><span class="pval"></span></div>`;
+}
+
+function paintPicker(el) {
+  const v = +el.dataset.value || 0;
+  $$(".pstar", el).forEach((s) => {
+    const i = +s.dataset.i;
+    s.className = "pstar" + (v >= i ? " on" : v >= i - 0.5 ? " half" : "");
+  });
+  el.setAttribute("aria-valuenow", v);
+  const label = $(".pval", el);
+  if (label) label.textContent = v ? `${fmtRating(v)} · ${ratingWords[v]}` : el.classList.contains("sm") ? "" : "Toca para puntuar";
+}
+
+function setPicker(el, v) {
+  v = Math.max(0, Math.min(5, Math.round(v * 2) / 2));
+  el.dataset.value = v;
+  paintPicker(el);
+  if (el.dataset.picker === "book") {
+    const b = getBook(view._book);
+    if (!b) return;
+    upsert({ ...b, rating: v, reviewedAt: b.reviewedAt || today() });
+    $("#heroStars").innerHTML = v ? starsHtml(v) : "";
+    const share = $('[data-action="share-review"]');
+    if (share) share.hidden = !v && !b.review;
+  }
+}
+
+function hasReview(b) {
+  return !!(b.review || Object.values(b.reviewParts || {}).some((p) => p.text || p.rating));
+}
+
+function reviewSectionHtml(b) {
+  const parts = REVIEW_PARTS.filter(([k]) => b.reviewParts?.[k]?.text || b.reviewParts?.[k]?.rating);
+  return `<section class="review-sec">
+    <h2 class="section">Su reseña</h2>
+    ${starPicker(b.rating, "book")}
+    ${
+      hasReview(b)
+        ? `${b.spoilers ? `<p class="spoiler-tag">Contiene spoilers</p>` : ""}
+           ${b.review ? `<p class="review clamp" id="reviewText">${esc(b.review)}</p>` : ""}
+           ${
+             parts.length
+               ? `<dl class="parts">${parts
+                   .map(
+                     ([k, label]) => `<div><dt>${label}${b.reviewParts[k].rating ? ` <span class="part-stars">★ ${fmtRating(b.reviewParts[k].rating)}</span>` : ""}</dt>
+                       ${b.reviewParts[k].text ? `<dd>${esc(b.reviewParts[k].text)}</dd>` : ""}</div>`
+                   )
+                   .join("")}</dl>`
+               : ""
+           }`
+        : ""
+    }
+    <div class="row-actions tight">
+      <a class="btn" href="#/review/${b.id}">${hasReview(b) ? "Editar reseña" : "Escribir reseña"}</a>
+      <button class="btn" data-action="share-review" ${b.rating || hasReview(b) ? "" : "hidden"}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M7.5 7.5 12 3l4.5 4.5M5 12v7a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Compartir
+      </button>
+    </div>
+  </section>`;
+}
+
+function renderReview(b) {
+  window.scrollTo(0, 0);
+  if (!b) {
+    view.innerHTML = `${backButton()}<div class="empty"><p>Libro no encontrado.</p></div>`;
+    return;
+  }
+  const parts = b.reviewParts || {};
+  const hasParts = REVIEW_PARTS.some(([k]) => parts[k]?.text || parts[k]?.rating);
+  view.innerHTML = `
+    ${backButton()}
+    <div class="review-head">
+      ${coverHtml(b, "cover sm")}
+      <div><p class="review-book">${esc(b.title)}</p><p class="muted small">${esc((b.authors || []).join(", "))}</p></div>
+    </div>
+    <form id="rf" class="form review-form">
+      ${starPicker(b.rating, "main", "lg")}
+      <label class="sr-only" for="rtext">Su reseña</label>
+      <textarea id="rtext" name="review" class="review-input" rows="6" placeholder="¿Qué te pareció? Una frase o todo lo que quieras contar…">${esc(b.review)}</textarea>
+
+      <details class="parts-edit" ${hasParts ? "open" : ""}>
+        <summary>Reseña por partes <span class="muted">(opcional)</span></summary>
+        ${REVIEW_PARTS.map(
+          ([k, label]) => `<div class="part">
+            <div class="part-head"><span>${label}</span>${starPicker(parts[k]?.rating, "part-" + k, "sm")}</div>
+            <textarea name="part-${k}" rows="2" placeholder="${label}…">${esc(parts[k]?.text)}</textarea>
+          </div>`
+        ).join("")}
+      </details>
+
+      <label class="check"><input type="checkbox" name="spoilers" ${b.spoilers ? "checked" : ""}> Contiene spoilers</label>
+
+      <div class="row-actions">
+        <button class="btn primary" type="submit">Guardar reseña</button>
+        <button class="btn" type="button" data-action="back">Cancelar</button>
+      </div>
+    </form>`;
+
+  $$(".picker", view).forEach(paintPicker);
+  view._book = null; // las estrellas de este formulario no guardan al instante
+  const form = $("#rf");
+  const grow = (t) => {
+    t.style.height = "auto";
+    t.style.height = t.scrollHeight + 2 + "px";
+  };
+  $$("textarea", form).forEach((t) => {
+    grow(t);
+    t.addEventListener("input", () => grow(t));
+  });
+  $("details", form).addEventListener("toggle", () => $$("textarea", form).forEach(grow));
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const reviewParts = {};
+    for (const [k] of REVIEW_PARTS) {
+      const text = form.elements["part-" + k].value.trim();
+      const rating = +$(`[data-picker="part-${k}"]`, form).dataset.value || 0;
+      if (text || rating) reviewParts[k] = { text, rating };
+    }
+    const fresh = getBook(b.id) || b;
+    upsert({
+      ...fresh,
+      rating: +$('[data-picker="main"]', form).dataset.value || 0,
+      review: form.elements.review.value.trim(),
+      reviewParts,
+      spoilers: form.elements.spoilers.checked,
+      reviewedAt: fresh.reviewedAt || today(),
+    });
+    toast("Reseña guardada");
+    go(`#/book/${b.id}`);
+  });
+}
+
+// ---------- Compartir reseña como imagen ----------
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+
+async function loadCoverForCanvas(url) {
+  if (!url) return null;
+  try {
+    if (url.startsWith("data:")) return await loadImage(url);
+    const r = await fetch("/api/cover?url=" + encodeURIComponent(url));
+    if (!r.ok) return null;
+    const blobUrl = URL.createObjectURL(await r.blob());
+    const img = await loadImage(blobUrl);
+    return img;
+  } catch {
+    return null;
+  }
+}
+
+function wrapLines(ctx, text, maxWidth, maxLines) {
+  const words = String(text).replace(/\s+/g, " ").trim().split(" ");
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (ctx.measureText(test).width <= maxWidth) line = test;
+    else {
+      if (line) lines.push(line);
+      line = w;
+      if (lines.length === maxLines) break;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  const used = lines.join(" ").length;
+  if (used < String(text).replace(/\s+/g, " ").trim().length && lines.length) {
+    let last = lines[lines.length - 1];
+    while (last && ctx.measureText(last + "…").width > maxWidth) last = last.slice(0, -1);
+    lines[lines.length - 1] = last.replace(/[\s,.;:]+$/, "") + "…";
+  }
+  return lines;
+}
+
+function drawStar(ctx, cx, cy, r, fill) {
+  const path = new Path2D();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 ? r * 0.45 : r;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    path[i ? "lineTo" : "moveTo"](cx + rad * Math.cos(a), cy + rad * Math.sin(a));
+  }
+  path.closePath();
+  ctx.fillStyle = "#dedad2";
+  ctx.fill(path);
+  if (fill > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cx - r, cy - r, fill >= 1 ? 2 * r : r, 2 * r);
+    ctx.clip();
+    ctx.fillStyle = "#161616";
+    ctx.fill(path);
+    ctx.restore();
+  }
+}
+
+async function buildReviewImage(b) {
+  const W = 1080, H = 1350;
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+  const serif = '"Newsreader", Georgia, serif';
+  const sans = '"Inter", system-ui, sans-serif';
+  try {
+    await Promise.all([
+      document.fonts.load(`500 64px "Newsreader"`),
+      document.fonts.load(`italic 400 38px "Newsreader"`),
+      document.fonts.load(`400 30px "Inter"`),
+    ]);
+  } catch {}
+
+  ctx.fillStyle = "#fbfaf8";
+  ctx.fillRect(0, 0, W, H);
+
+  // Texto de la reseña (sin spoilers en la imagen)
+  const firstPart = REVIEW_PARTS.map(([k]) => b.reviewParts?.[k]?.text).find(Boolean);
+  const quote = b.spoilers ? "" : b.review || firstPart || "";
+
+  // Portada
+  const coverH = quote ? 560 : 680;
+  const coverW = Math.round(coverH * 2 / 3);
+  const cx = (W - coverW) / 2, cy = quote ? 96 : 130;
+  const img = await loadCoverForCanvas(b.cover);
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.18)";
+  ctx.shadowBlur = 40;
+  ctx.shadowOffsetY = 16;
+  ctx.fillStyle = "#e9e5dd";
+  ctx.fillRect(cx, cy, coverW, coverH);
+  ctx.restore();
+  if (img) {
+    // recorte tipo "cover"
+    const r = Math.max(coverW / img.width, coverH / img.height);
+    const sw = coverW / r, sh = coverH / r;
+    ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, cx, cy, coverW, coverH);
+  } else {
+    ctx.fillStyle = "#1f1f1f";
+    ctx.font = `500 44px ${serif}`;
+    ctx.textAlign = "left";
+    const lines = wrapLines(ctx, b.title, coverW - 60, 5);
+    lines.forEach((l, i) => ctx.fillText(l, cx + 30, cy + coverH - 40 - (lines.length - 1 - i) * 54));
+  }
+
+  let y = cy + coverH + 86;
+  ctx.textAlign = "center";
+
+  // Estrellas
+  if (b.rating) {
+    const r = 26, gap = 66, startX = W / 2 - gap * 2;
+    for (let i = 0; i < 5; i++) drawStar(ctx, startX + i * gap, y, r, Math.max(0, Math.min(1, b.rating - i)));
+    y += 74;
+  }
+
+  // Título y autor
+  ctx.fillStyle = "#161616";
+  ctx.font = `500 58px ${serif}`;
+  const titleLines = wrapLines(ctx, b.title, W - 200, 2);
+  titleLines.forEach((l) => {
+    ctx.fillText(l, W / 2, y + 20);
+    y += 66;
+  });
+  ctx.fillStyle = "#8a8780";
+  ctx.font = `400 30px ${sans}`;
+  if (b.authors?.length) {
+    ctx.fillText(b.authors.join(", "), W / 2, y + 8);
+    y += 48;
+  }
+
+  // Cita de la reseña
+  if (quote) {
+    y += 40;
+    ctx.fillStyle = "#2a2a2a";
+    ctx.font = `italic 400 38px ${serif}`;
+    const maxLines = Math.max(2, Math.floor((H - 130 - y) / 54));
+    const lines = wrapLines(ctx, `“${quote}”`, W - 220, Math.min(maxLines, 5));
+    lines.forEach((l) => {
+      ctx.fillText(l, W / 2, y + 10);
+      y += 54;
+    });
+  }
+
+  // Pie
+  ctx.fillStyle = "#a8a49c";
+  ctx.font = `italic 400 28px ${serif}`;
+  const date = b.finishedAt ? " · " + fmtDate(b.finishedAt) : "";
+  ctx.fillText("La biblioteca de Ilary" + date, W / 2, H - 64);
+
+  return new Promise((res) => c.toBlob(res, "image/png"));
+}
+
+let shareBlobUrl = "";
+async function shareReview(b, btn) {
+  btn.disabled = true;
+  try {
+    const blob = await buildReviewImage(b);
+    const fileName = `resena-${norm(b.title).slice(0, 40) || "libro"}.png`;
+    const file = new File([blob], fileName, { type: "image/png" });
+    if (shareBlobUrl) URL.revokeObjectURL(shareBlobUrl);
+    shareBlobUrl = URL.createObjectURL(blob);
+    const canShare = navigator.canShare?.({ files: [file] });
+    sheet.innerHTML = `<div class="sheet-inner">
+      <button class="close" data-close aria-label="Cerrar">×</button>
+      <h2 class="sheet-title">Compartir reseña</h2>
+      <img class="share-preview" src="${shareBlobUrl}" alt="Imagen de la reseña de ${esc(b.title)}">
+      ${b.spoilers ? `<p class="muted small center">La reseña tiene spoilers, así que la imagen solo muestra la puntuación.</p>` : ""}
+      <div class="status-buttons two-cols">
+        ${canShare ? `<button class="btn primary" id="doShare">Compartir</button>` : ""}
+        <a class="btn ${canShare ? "" : "primary"}" href="${shareBlobUrl}" download="${fileName}">Guardar imagen</a>
+      </div>
+    </div>`;
+    sheet._candidate = null;
+    if (!sheet.open) sheet.showModal();
+    $("#doShare")?.addEventListener("click", async () => {
+      try {
+        await navigator.share({ files: [file], title: b.title });
+      } catch (e) {
+        if (e.name !== "AbortError") toast("No se pudo compartir; usa Guardar imagen");
+      }
+    });
+  } catch (e) {
+    console.warn(e);
+    toast("No se pudo crear la imagen");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------- Ajustes compartidos ----------
@@ -1324,8 +1679,15 @@ function parseGoodreadsCsv(text) {
 
 // ---------- Eventos globales ----------
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work]");
+  const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work],[data-rate],#reviewText");
   if (!t) return;
+
+  if (t.dataset.rate) {
+    const picker = t.closest("[data-picker]");
+    const v = +t.dataset.rate;
+    return setPicker(picker, +picker.dataset.value === v ? 0 : v);
+  }
+  if (t.id === "reviewText") return t.classList.remove("clamp");
 
   if (t.dataset.close != null) return t.closest("dialog")?.close();
   if (t.dataset.preview != null) return openPreview(lastResults[+t.dataset.preview]);
@@ -1351,6 +1713,11 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "share-review": {
+      const b = getBook(view._book);
+      if (b) shareReview(b, t);
+      return;
+    }
     case "gr-sync":
       return goodreadsSync().catch(() => {});
     case "gr-disconnect":
@@ -1385,6 +1752,16 @@ document.addEventListener("change", (e) => {
   if (!field) return;
   const b = getBook(view._book);
   if (b) upsert({ ...b, [field]: e.target.value });
+});
+
+// Teclado en el selector de estrellas
+document.addEventListener("keydown", (e) => {
+  const picker = e.target.closest?.("[data-picker]");
+  if (!picker) return;
+  const step = { ArrowRight: 0.5, ArrowUp: 0.5, ArrowLeft: -0.5, ArrowDown: -0.5 }[e.key];
+  if (step == null) return;
+  e.preventDefault();
+  setPicker(picker, (+picker.dataset.value || 0) + step);
 });
 
 // Cerrar hojas tocando el fondo
