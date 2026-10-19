@@ -405,6 +405,7 @@ function backButton() {
 
 // ---------- Vista: estanterías ----------
 let shelfFilter = "";
+let viewMode = load("lib.view", "spines");
 function renderShelf(status) {
   window.scrollTo(0, 0);
   const counts = {};
@@ -418,8 +419,18 @@ function renderShelf(status) {
         )
         .join("")}
     </div>
-    <input class="filter" type="search" placeholder="Filtrar por título o autor" value="${esc(shelfFilter)}" aria-label="Filtrar">
-    <div class="grid" id="grid"></div>`;
+    <div class="toolbar">
+      <input class="filter" type="search" placeholder="Filtrar por título o autor" value="${esc(shelfFilter)}" aria-label="Filtrar">
+      <div class="viewtoggle" role="group" aria-label="Vista">
+        <button data-viewmode="spines" aria-pressed="${viewMode === "spines"}" title="Estantería" aria-label="Estantería">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v15M9 6v13M13 3v16M17.5 6l2.5 13M3 20.5h18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+        <button data-viewmode="covers" aria-pressed="${viewMode === "covers"}" title="Portadas" aria-label="Portadas">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="4" width="6.5" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="14.5" width="6.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13.5" y="14.5" width="6.5" height="5.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="grid"></div>`;
 
   const draw = () => {
     const f = norm(shelfFilter);
@@ -428,8 +439,10 @@ function renderShelf(status) {
       .filter((b) => b.status === status)
       .filter((b) => !f || norm(b.title).includes(f) || (b.authors || []).some((a) => norm(a).includes(f)))
       .sort((a, b) => String(b[sortKey] || "").localeCompare(String(a[sortKey] || "")) || (b.updatedAt || 0) - (a.updatedAt || 0));
-    $("#grid").innerHTML = list.length
-      ? list.map(cardHtml).join("")
+    const grid = $("#grid");
+    grid.className = list.length ? (viewMode === "spines" ? "shelf" : "grid") : "";
+    grid.innerHTML = list.length
+      ? list.map(viewMode === "spines" ? spineHtml : cardHtml).join("")
       : `<div class="empty">
           <p>${f ? "Nada coincide con ese filtro." : SHELVES[status].empty}</p>
           ${f ? "" : `<a class="btn primary" href="#/add">Agregar un libro</a>`}
@@ -439,7 +452,35 @@ function renderShelf(status) {
     shelfFilter = e.target.value;
     draw();
   });
+  $$("[data-viewmode]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      viewMode = btn.dataset.viewmode;
+      save("lib.view", viewMode);
+      $$("[data-viewmode]").forEach((b) => b.setAttribute("aria-pressed", b === btn));
+      draw();
+    })
+  );
   draw();
+}
+
+// Lomos: el ancho depende de las páginas; el alto y el tono, del título.
+const SPINE_TONES = [
+  ["#1f1f1f", "#f4f2ee"], ["#e9e5dd", "#1f1f1f"], ["#5b6b5d", "#f4f2ee"], ["#c9c2b4", "#1f1f1f"],
+  ["#3f4a5a", "#f4f2ee"], ["#a8553e", "#f4f2ee"], ["#d8d2c4", "#1f1f1f"], ["#7d7468", "#f4f2ee"],
+  ["#2e3b36", "#f4f2ee"], ["#b8a98a", "#1f1f1f"],
+];
+function spineHtml(b) {
+  const seed = hueOf(b.title + (b.authors || [])[0]);
+  const pages = b.pages || 280;
+  const width = Math.round(Math.min(46, Math.max(24, 18 + pages / 22)));
+  const height = 148 + (seed % 5) * 9;
+  const [bg, fg] = SPINE_TONES[seed % SPINE_TONES.length];
+  const author = (b.authors || [])[0] || "";
+  const surname = author.split(/\s+/).slice(-1)[0] || "";
+  return `<a class="spine" href="#/book/${b.id}" style="--w:${width}px;--hgt:${height}px;--sb:${bg};--sf:${fg}" aria-label="${esc(b.title)}${author ? ", de " + esc(author) : ""}">
+    <span class="spine-title">${esc(b.title)}</span>
+    ${surname ? `<span class="spine-author">${esc(surname)}</span>` : ""}
+  </a>`;
 }
 
 function cardHtml(b) {
