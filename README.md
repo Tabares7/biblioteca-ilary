@@ -7,4 +7,5 @@ Una biblioteca digital personal para llevar el registro de todo lo que se lee.
 - **Escáner de código de barras** para agregar un libro físico apuntando la cámara a su ISBN.
 - **Fichas de autor** con biografía, foto, sus libros en la biblioteca y otras obras para descubrir.
 - **Alta manual** para libros que no aparecen en ninguna fuente, con foto de portada propia.
+- **Conexión con Goodreads**: con el enlace del perfil se importan estanterías, puntuaciones, reseñas, fechas, etiquetas y sagas, y lo nuevo se sincroniza solo. También acepta el CSV de exportación para el historial completo.
 - **Funciona sin conexión**: se instala en el teléfono como app y los cambios se sincronizan cuando vuelve internet.

@@ -308,3 +308,34 @@ h1, h2 { font-family: var(--serif); font-weight: 500; line-height: 1.15; margin:
 @media (prefers-reduced-motion: reduce) {
   *, .sheet[open] { animation: none !important; transition: none !important; }
 }
+
+/* ---------- Puntuación, reseña, etiquetas ---------- */
+.series { margin: 0 0 6px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.stars { margin: 10px 0 0; display: flex; gap: 2px; font-size: 17px; line-height: 1; letter-spacing: 0; }
+.stars span { color: var(--line); }
+.stars span.on { color: var(--ink); }
+.stars span.half { background: linear-gradient(90deg, var(--ink) 50%, var(--line) 50%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.review { white-space: pre-line; margin: 0; font-family: var(--serif); font-size: 17px; line-height: 1.55; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+.tags span { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--soft); color: var(--ink-2); }
+
+/* ---------- Goodreads ---------- */
+.gr-link {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 16px; margin: -8px 0 24px; border: 1px solid var(--line); border-radius: 14px;
+  text-decoration: none; background: var(--surface); font-size: 14px; line-height: 1.4;
+}
+.gr-link strong { font-weight: 500; }
+.panel { padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); margin-bottom: 14px; }
+.panel-title { margin: 0 0 6px; font-weight: 500; }
+.panel-title strong { font-weight: 600; }
+.panel .searchbar { margin-top: 12px; }
+.small { font-size: 13.5px; color: var(--ink-2); margin: 6px 0; }
+.muted.small { color: var(--muted); }
+#grStatus.error { color: var(--danger); }
+.steps { padding-left: 20px; margin: 8px 0 14px; }
+.steps li { margin: 3px 0; }
+.help { margin-top: 10px; font-size: 13.5px; color: var(--ink-2); }
+.help summary { cursor: pointer; color: var(--ink); }
+.help p { margin: 8px 0 0; }
+.row-actions.tight { margin-top: 14px; }

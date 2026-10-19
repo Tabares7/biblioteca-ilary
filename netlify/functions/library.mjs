@@ -63,7 +63,25 @@ export default async (req) => {
     return json({ books });
   }
 
+  // Ajustes compartidos entre dispositivos (p. ej. conexión con Goodreads)
+  if (pathname === "/api/settings") {
+    if (req.method === "GET") return json({ settings: (await store.get("settings", { type: "json" })) || {} });
+    if (req.method === "POST") {
+      let patch;
+      try {
+        patch = JSON.parse((await req.text()) || "{}");
+      } catch {
+        return json({ error: "bad_json" }, 400);
+      }
+      const current = (await store.get("settings", { type: "json" })) || {};
+      const next = { ...current, ...patch };
+      for (const k of Object.keys(next)) if (next[k] === null) delete next[k];
+      await store.setJSON("settings", next);
+      return json({ settings: next });
+    }
+  }
+
   return json({ error: "not_found" }, 404);
 };
 
-export const config = { path: ["/api/books", "/api/sync"] };
+export const config = { path: ["/api/books", "/api/sync", "/api/settings"] };

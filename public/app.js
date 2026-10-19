@@ -45,6 +45,7 @@ const db = {
   queue: load("lib.queue", []),
   key: load("lib.key", ""),
 };
+let settings = load("lib.settings", {});
 const persist = () => {
   save("lib.books", db.books);
   save("lib.queue", db.queue);
@@ -363,7 +364,7 @@ function route() {
   const params = new URLSearchParams(qs || "");
   currentRoute = parts[0];
   closeDialogs();
-  const navKey = ["add", "manual"].includes(parts[0]) ? "add" : "shelf";
+  const navKey = ["add", "manual", "goodreads"].includes(parts[0]) ? "add" : "shelf";
   $$(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === navKey));
   $('.nav a[data-nav="shelf"]').href = `#/shelf/${lastShelf}`;
 
@@ -379,6 +380,8 @@ function route() {
       return renderForm(getBook(parts[1]), params);
     case "book":
       return renderBook(parts[1]);
+    case "goodreads":
+      return renderGoodreads();
     case "author":
       return renderAuthor(decodeURIComponent(parts[1] || ""), parts[2] || "");
     default:
@@ -517,6 +520,10 @@ function renderAdd(q) {
         Agregar a mano
       </a>
     </div>
+    <a class="gr-link" href="#/goodreads">
+      <span><strong>Importar desde Goodreads</strong><br><span class="muted">${settings.grUser ? `Conectado${settings.grName ? " como " + esc(settings.grName) : ""}` : "Trae todos sus libros de una vez"}</span></span>
+      <span aria-hidden="true">→</span>
+    </a>
     <div id="results" class="results"></div>`;
 
   $("#sf").addEventListener("submit", (e) => {
@@ -645,7 +652,7 @@ async function renderBook(id) {
 
   const grQuery = b.isbn || `${b.title} ${(b.authors || [])[0] || ""}`;
   const links = [
-    [`https://www.goodreads.com/search?q=${encodeURIComponent(grQuery)}`, "Goodreads"],
+    [b.links?.goodreads || `https://www.goodreads.com/search?q=${encodeURIComponent(grQuery)}`, "Goodreads"],
     [b.links?.google, "Google Books"],
     [b.links?.openlibrary, "Open Library"],
   ].filter(([u]) => u);
@@ -659,9 +666,11 @@ async function renderBook(id) {
       <div class="book-hero">
         ${coverHtml(b, "cover xl")}
         <div class="book-heading">
+          ${b.series?.name ? `<p class="series">${esc(b.series.name)}${b.series.number ? ` · Libro ${esc(b.series.number)}` : ""}</p>` : ""}
           <h1>${esc(b.title)}</h1>
           ${b.subtitle ? `<p class="sub">${esc(b.subtitle)}</p>` : ""}
           <p class="authors">${authorLinks(b) || `<span class="muted">Autor desconocido</span>`}</p>
+          ${b.rating ? starsHtml(b.rating) : ""}
         </div>
       </div>
 
@@ -680,6 +689,10 @@ async function renderBook(id) {
             </div>`
           : ""
       }
+
+      ${b.review ? `<section><h2 class="section">Su reseña</h2><p class="review">${esc(b.review)}</p></section>` : ""}
+
+      ${(b.tags || []).length ? `<div class="tags">${b.tags.map((t) => `<span>${esc(t.replace(/-/g, " "))}</span>`).join("")}</div>` : ""}
 
       ${
         b.description
@@ -964,6 +977,351 @@ $("#isbnForm").addEventListener("submit", (e) => {
   }
 });
 
+// ---------- Estrellas ----------
+function starsHtml(r) {
+  const full = Math.floor(r);
+  const half = r - full >= 0.5;
+  let out = "";
+  for (let i = 0; i < 5; i++) out += `<span class="${i < full ? "on" : i === full && half ? "half" : ""}">★</span>`;
+  return `<p class="stars" aria-label="${r} de 5 estrellas">${out}</p>`;
+}
+
+// ---------- Ajustes compartidos ----------
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "content-type": "application/json", "x-app-key": db.key, ...(opts.headers || {}) } });
+  if (r.status === 401) {
+    askKey();
+    throw Object.assign(new Error("unauthorized"), { status: 401 });
+  }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || "HTTP " + r.status), { status: r.status });
+  return data;
+}
+
+async function saveSettings(patch) {
+  settings = { ...settings, ...patch };
+  for (const k of Object.keys(settings)) if (settings[k] === null) delete settings[k];
+  save("lib.settings", settings);
+  try {
+    await api("/api/settings", { method: "POST", body: JSON.stringify(patch) });
+  } catch (e) {
+    console.warn("No se pudieron guardar los ajustes en la nube", e);
+  }
+}
+
+async function loadSettings() {
+  if (!navigator.onLine) return;
+  try {
+    const { settings: remote } = await api("/api/settings");
+    settings = { ...settings, ...remote };
+    save("lib.settings", settings);
+  } catch {}
+}
+
+// ---------- Goodreads: fusión ----------
+const GR_SHELVES = { read: "read", "currently-reading": "reading", "to-read": "want" };
+const GR_DNF = /(^|-)(dnf|did-not-finish|abandon|abandonado|abandonados|no-terminado|dejado)/i;
+const olCoverByIsbn = (isbn) => (isbn ? `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false` : "");
+
+function splitSeries(raw) {
+  const t = String(raw || "").trim();
+  const m = t.match(/^(.*\S)\s*\(([^()]+?),?\s*#(\d+(?:\.\d+)?)(?:-\d+)?\)$/);
+  return m ? { title: m[1], series: { name: m[2].trim(), number: parseFloat(m[3]) } } : { title: t, series: null };
+}
+
+// Campos que vienen de Goodreads y que ella también puede editar aquí.
+const GR_SYNCED = ["status", "rating", "review", "tags", "finishedAt", "series"];
+const grSnapshot = (g) => JSON.stringify(GR_SYNCED.map((k) => g[k] ?? null));
+
+function findMatch(g) {
+  return (
+    (g.grId && db.books.find((b) => b.grId === g.grId)) ||
+    (g.isbn && db.books.find((b) => b.isbn && b.isbn === g.isbn)) ||
+    db.books.find((b) => bookKey(b) === bookKey(g))
+  );
+}
+
+// Fusiona libros de Goodreads sin pisar lo que ella cambió aquí:
+// un campo solo se actualiza si cambió en Goodreads desde la última sincronización.
+function mergeGoodreads(list) {
+  let added = 0, updated = 0;
+  const ops = [];
+  const now = Date.now();
+  for (const g of list) {
+    if (!g.title || !g.status) continue;
+    const snap = grSnapshot(g);
+    const existing = findMatch(g);
+    if (!existing) {
+      const book = {
+        id: crypto.randomUUID(),
+        title: g.title,
+        subtitle: "",
+        authors: g.authors || [],
+        olAuthors: [],
+        year: g.year || "",
+        pages: g.pages || null,
+        genres: [],
+        publisher: g.publisher || "",
+        description: g.description || "",
+        language: "",
+        isbn: g.isbn || "",
+        cover: g.cover || olCoverByIsbn(g.isbn),
+        olWorkKey: "",
+        links: g.link ? { goodreads: g.link } : {},
+        source: "goodreads",
+        status: g.status,
+        addedAt: g.addedAt || today(),
+        startedAt: g.status === "reading" ? g.startedAt || today() : g.startedAt || "",
+        finishedAt: g.finishedAt || "",
+        rating: g.rating || 0,
+        review: g.review || "",
+        tags: g.tags || [],
+        series: g.series || null,
+        grId: g.grId || "",
+        grSnap: snap,
+        updatedAt: now,
+      };
+      db.books.push(book);
+      ops.push({ op: "upsert", book });
+      added++;
+      continue;
+    }
+    const next = { ...existing };
+    let changed = false;
+    // Datos del libro: solo rellenar huecos
+    for (const k of ["year", "pages", "isbn", "description", "publisher"]) {
+      if (!next[k] && g[k]) (next[k] = g[k]), (changed = true);
+    }
+    if (!next.cover && (g.cover || g.isbn)) (next.cover = g.cover || olCoverByIsbn(g.isbn)), (changed = true);
+    if (g.link && !next.links?.goodreads) (next.links = { ...(next.links || {}), goodreads: g.link }), (changed = true);
+    if (g.grId && !next.grId) (next.grId = g.grId), (changed = true);
+    // Datos de lectura: solo si cambiaron en Goodreads
+    if (existing.grSnap !== snap) {
+      const prev = existing.grSnap ? JSON.parse(existing.grSnap) : null;
+      GR_SYNCED.forEach((k, i) => {
+        const incoming = g[k] ?? null;
+        const emptyIncoming = incoming === null || incoming === "" || incoming === 0 || (Array.isArray(incoming) && !incoming.length);
+        const wasChangedThere = !prev || JSON.stringify(prev[i]) !== JSON.stringify(incoming);
+        if (wasChangedThere && !(emptyIncoming && !prev)) next[k] = incoming;
+      });
+      if (next.status === "reading" && !next.startedAt) next.startedAt = today();
+      next.grSnap = snap;
+      changed = true;
+    }
+    if (changed) {
+      next.updatedAt = now;
+      Object.assign(existing, next);
+      ops.push({ op: "upsert", book: next });
+      updated++;
+    }
+  }
+  if (ops.length) {
+    db.queue.push(...ops);
+    persist();
+    scheduleSync();
+  }
+  return { added, updated };
+}
+
+// ---------- Goodreads: conexión por perfil ----------
+let grBusy = false;
+
+async function goodreadsSync({ silent = false, user = settings.grUser } = {}) {
+  if (grBusy || !user || !navigator.onLine) return null;
+  grBusy = true;
+  updateGrStatus("Sincronizando con Goodreads…");
+  try {
+    const data = await api("/api/goodreads?user=" + encodeURIComponent(user));
+    const result = mergeGoodreads(data.books || []);
+    await saveSettings({ grUser: data.userId, grName: data.userName || settings.grName || "", grLastSync: Date.now(), grCount: (data.books || []).length });
+    const msg = result.added || result.updated
+      ? `Goodreads: ${result.added} nuevo(s), ${result.updated} actualizado(s)`
+      : "Goodreads: todo al día";
+    if (!silent || result.added || result.updated) toast(msg);
+    if (currentRoute === "shelf" || currentRoute === "goodreads") rerenderSoft();
+    return result;
+  } catch (e) {
+    const reason = {
+      404: "No encontramos ese perfil de Goodreads.",
+      403: "Ese perfil es privado. Hay que hacerlo público en Goodreads.",
+      400: "Ese enlace no parece un perfil de Goodreads.",
+    }[e.status] || "No se pudo conectar con Goodreads. Inténtalo más tarde.";
+    if (!silent) toast(reason);
+    updateGrStatus(reason, true);
+    throw e;
+  } finally {
+    grBusy = false;
+    updateGrStatus();
+  }
+}
+
+function maybeAutoSyncGoodreads() {
+  const SIX_HOURS = 6 * 3600 * 1000;
+  if (settings.grUser && Date.now() - (settings.grLastSync || 0) > SIX_HOURS) goodreadsSync({ silent: true }).catch(() => {});
+}
+
+function rerenderSoft() {
+  if (document.activeElement?.matches("input, textarea")) return;
+  const y = window.scrollY;
+  route();
+  window.scrollTo(0, y);
+}
+
+function updateGrStatus(text, isError) {
+  const el = $("#grStatus");
+  if (!el) return;
+  if (text) {
+    el.textContent = text;
+    el.classList.toggle("error", !!isError);
+    return;
+  }
+  if (!el.classList.contains("error")) el.textContent = grStatusText();
+}
+
+function timeAgo(ts) {
+  if (!ts) return "nunca";
+  const m = Math.round((Date.now() - ts) / 60000);
+  if (m < 1) return "ahora mismo";
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `hace ${h} h`;
+  return `hace ${Math.round(h / 24)} d`;
+}
+const grStatusText = () =>
+  settings.grUser ? `Última sincronización: ${timeAgo(settings.grLastSync)}${settings.grCount != null ? ` · ${settings.grCount} libros en Goodreads` : ""}` : "";
+
+function renderGoodreads() {
+  window.scrollTo(0, 0);
+  const connected = !!settings.grUser;
+  view.innerHTML = `
+    ${backButton()}
+    <h1 class="page-title">Goodreads</h1>
+
+    <section class="panel">
+      ${
+        connected
+          ? `<p class="panel-title">Conectado${settings.grName ? ` como <strong>${esc(settings.grName)}</strong>` : ""}</p>
+             <p class="muted small" id="grStatus">${grStatusText()}</p>
+             <p class="small">Lo nuevo que agregue en Goodreads aparece aquí solo. Lo que cambie en esta app no se pierde al sincronizar.</p>
+             <div class="row-actions tight">
+               <button class="btn primary" data-action="gr-sync">Sincronizar ahora</button>
+               <button class="btn" data-action="gr-disconnect">Desconectar</button>
+             </div>`
+          : `<p class="panel-title">Conectar su perfil</p>
+             <p class="small">Pega el enlace de su perfil de Goodreads. Se traen sus estanterías con puntuaciones, reseñas, fechas y etiquetas.</p>
+             <form id="grForm" class="searchbar">
+               <input name="user" placeholder="goodreads.com/user/show/…" autocomplete="off" inputmode="url" aria-label="Enlace del perfil de Goodreads">
+               <button class="btn primary">Conectar</button>
+             </form>
+             <p class="muted small" id="grStatus"></p>
+             <details class="help">
+               <summary>¿Dónde está el enlace?</summary>
+               <p>En la app de Goodreads: <em>Perfil → Compartir</em>, o en la web, la dirección de su página de perfil. También vale solo el número.</p>
+               <p>El perfil tiene que ser público: en Goodreads, <em>Settings → Privacy</em>, la opción de quién puede ver el perfil en <em>anyone</em>.</p>
+             </details>`
+      }
+    </section>
+
+    <section class="panel">
+      <p class="panel-title">Historial completo (CSV)</p>
+      <p class="small">El enlace trae casi todo, pero el archivo de exportación de Goodreads es más completo. Se hace desde un navegador:</p>
+      <ol class="small steps">
+        <li>Entrar a <a href="https://www.goodreads.com/review/import" target="_blank" rel="noopener">goodreads.com/review/import</a></li>
+        <li>Tocar <em>Export Library</em> y esperar a que aparezca el enlace del archivo</li>
+        <li>Descargarlo y subirlo aquí</li>
+      </ol>
+      <label class="btn">Subir CSV de Goodreads<input type="file" accept=".csv,text/csv" id="grCsv" hidden></label>
+      <p class="muted small" id="csvStatus"></p>
+    </section>`;
+
+  $("#grForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const val = e.target.user.value.trim();
+    if (!val) return;
+    const btn = e.target.querySelector("button");
+    btn.disabled = true;
+    try {
+      await goodreadsSync({ user: val });
+      renderGoodreads();
+    } catch {
+      btn.disabled = false;
+    }
+  });
+
+  $("#grCsv").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const status = $("#csvStatus");
+    status.textContent = "Leyendo archivo…";
+    try {
+      const rows = parseGoodreadsCsv(await f.text());
+      if (!rows.length) throw new Error("vacío");
+      const { added, updated } = mergeGoodreads(rows);
+      status.textContent = `Listo: ${added} libro(s) nuevo(s) y ${updated} actualizado(s) de ${rows.length} en el archivo.`;
+      toast("Importación completada");
+    } catch {
+      status.textContent = "Ese archivo no parece una exportación de Goodreads.";
+    }
+    e.target.value = "";
+  });
+}
+
+// ---------- Goodreads: CSV ----------
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') (field += '"'), i++;
+        else inQ = false;
+      } else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") row.push(field), (field = "");
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field), rows.push(row), (row = []), (field = "");
+    } else field += c;
+  }
+  if (field || row.length) row.push(field), rows.push(row);
+  return rows.filter((r) => r.some((x) => x.trim()));
+}
+
+function parseGoodreadsCsv(text) {
+  const [head, ...rows] = parseCsv(text.replace(/^﻿/, ""));
+  const idx = Object.fromEntries((head || []).map((h, i) => [h.trim(), i]));
+  if (idx["Title"] == null || idx["Exclusive Shelf"] == null) throw new Error("formato");
+  const get = (r, k) => (idx[k] != null ? (r[idx[k]] || "").trim() : "");
+  const isbnOf = (v) => v.replace(/^="?|"$/g, "").replace(/[^\dX]/gi, "");
+  const date = (v) => (/^\d{4}\/\d{2}\/\d{2}$/.test(v) ? v.replace(/\//g, "-") : "");
+  return rows.map((r) => {
+    const exclusive = get(r, "Exclusive Shelf");
+    const shelves = get(r, "Bookshelves").split(",").map((s) => s.trim()).filter(Boolean);
+    const status = GR_DNF.test(exclusive) || shelves.some((s) => GR_DNF.test(s)) ? "abandoned" : GR_SHELVES[exclusive] || "";
+    const { title, series } = splitSeries(get(r, "Title"));
+    const authors = [get(r, "Author"), ...get(r, "Additional Authors").split(",")].map((s) => s.trim()).filter(Boolean);
+    const grId = get(r, "Book Id");
+    return {
+      grId,
+      title,
+      series,
+      authors,
+      year: get(r, "Original Publication Year") || get(r, "Year Published"),
+      pages: parseInt(get(r, "Number of Pages"), 10) || null,
+      isbn: isbnOf(get(r, "ISBN13")) || isbnOf(get(r, "ISBN")),
+      publisher: get(r, "Publisher"),
+      status,
+      rating: parseInt(get(r, "My Rating"), 10) || 0,
+      review: stripHtml(get(r, "My Review")),
+      tags: shelves.filter((s) => s !== exclusive && !GR_SHELVES[s] && !GR_DNF.test(s)),
+      finishedAt: status === "read" || status === "abandoned" ? date(get(r, "Date Read")) : "",
+      addedAt: date(get(r, "Date Added")),
+      link: grId ? `https://www.goodreads.com/book/show/${grId}` : "",
+    };
+  });
+}
+
 // ---------- Eventos globales ----------
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-action],[data-preview],[data-add],[data-status],[data-close],[data-author-work]");
@@ -993,6 +1351,13 @@ document.addEventListener("click", (e) => {
       return history.length > 1 ? history.back() : go("#/shelf/" + lastShelf);
     case "scan":
       return openScanner();
+    case "gr-sync":
+      return goodreadsSync().catch(() => {});
+    case "gr-disconnect":
+      if (confirm("¿Desconectar Goodreads? Los libros ya importados se quedan.")) {
+        saveSettings({ grUser: null, grName: null, grLastSync: null, grCount: null }).then(renderGoodreads);
+      }
+      return;
     case "more": {
       $("#bdesc")?.classList.remove("clamp");
       return t.remove();
@@ -1035,7 +1400,12 @@ window.addEventListener("online", () => {
   sync();
 });
 window.addEventListener("offline", updateSyncBadge);
-document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && sync());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    sync();
+    maybeAutoSyncGoodreads();
+  }
+});
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("SW", e));
@@ -1044,3 +1414,4 @@ if ("serviceWorker" in navigator) {
 route();
 updateSyncBadge();
 sync();
+loadSettings().then(maybeAutoSyncGoodreads);
